@@ -26,7 +26,12 @@ class HttpError extends Error {
 export async function createApp({ configPath = path.join(ROOT, "readiness.config.json"), stateDir = process.env.STATE_DIR || path.join(ROOT, "data"), defaultMode = process.env.DEMO === "1" ? "demo" : "live", env = process.env, deps = {} } = {}) {
   const config = JSON.parse(await fs.readFile(configPath, "utf8"));
   const stores = {};
-  const getStore = async (mode) => (stores[mode] ||= await createStore(path.join(stateDir, mode === "demo" ? "state.demo.json" : "state.json"), mode === "demo" ? DEMO_SEED : undefined));
+  // Waivers, manual checks and the audit log belong to one release, so each repo and release branch gets its own file.
+  const storeKey = ({ mode, release }) => (mode === "demo" ? "demo" : `live.${release.repo}@${release.headRef}`.toLowerCase().replace(/\//g, "__").replace(/[^a-z0-9@._-]+/g, "-"));
+  const getStore = async (t) => {
+    const key = storeKey(t);
+    return (stores[key] ||= await createStore(path.join(stateDir, key === "demo" ? "state.demo.json" : `state.${key}.json`), t.mode === "demo" ? DEMO_SEED : undefined));
+  };
   const cache = new Map();
   const manualIds = new Set(config.criteria.filter((c) => c.type === "manual").map((c) => c.params.checkId));
 
@@ -51,7 +56,7 @@ export async function createApp({ configPath = path.join(ROOT, "readiness.config
   }
 
   async function payload(t, refresh = false) {
-    const store = await getStore(t.mode);
+    const store = await getStore(t);
     const snapshot = await snapshotFor(t, refresh);
     const result = evaluate(snapshot, config, store.get());
     const key = `${t.mode}:${t.release.repo}@${t.release.headRef}`;
@@ -122,7 +127,7 @@ export async function createApp({ configPath = path.join(ROOT, "readiness.config
       guard(req);
       const body = await readBody(req);
       const t = target(url.searchParams);
-      const store = await getStore(t.mode);
+      const store = await getStore(t);
       const current = evaluate(await snapshotFor(t, false), config, store.get());
       const crit = current.criteria.find((c) => c.id === body.id);
       if (!crit) throw new HttpError(404, "Unknown criterion.");
@@ -141,7 +146,7 @@ export async function createApp({ configPath = path.join(ROOT, "readiness.config
       guard(req);
       const body = await readBody(req);
       const t = target(url.searchParams);
-      const store = await getStore(t.mode);
+      const store = await getStore(t);
       const by = text(body.by, 80);
       if (!by) throw new HttpError(400, "Say who is removing this waiver.");
       await store.mutate((s) => {
@@ -156,7 +161,7 @@ export async function createApp({ configPath = path.join(ROOT, "readiness.config
       guard(req);
       const body = await readBody(req);
       const t = target(url.searchParams);
-      const store = await getStore(t.mode);
+      const store = await getStore(t);
       if (!manualIds.has(body.checkId)) throw new HttpError(404, "Unknown manual check.");
       if (!["pass", "fail", "unset"].includes(body.state)) throw new HttpError(400, "State must be pass, fail or unset.");
       const by = text(body.by, 80);
@@ -177,7 +182,7 @@ export async function createApp({ configPath = path.join(ROOT, "readiness.config
       const data = await payload(t);
       const dashboardUrl = env.PUBLIC_URL || undefined;
       await (deps.sendSlack || sendSlack)(env.SLACK_WEBHOOK_URL, buildSlackMessage({ release: data.snapshot.release, result: data.result, dashboardUrl }));
-      const store = await getStore(t.mode);
+      const store = await getStore(t);
       await store.mutate((s) => { s.audit.push(auditEntry("notify", text(body.by, 80), `Posted ${data.result.verdict.call} to Slack`)); });
       return payload(t);
     },

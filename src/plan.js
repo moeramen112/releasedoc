@@ -21,6 +21,14 @@ export const CHECK_STATES = [
   { v: "fail", l: "Failed" },
   { v: "na", l: "Not applicable" },
 ];
+/** Lists and switches a project can change. Everything the forms offer comes from here, not from code. */
+export const defaultSettings = () => ({
+  areas: [...AREAS],
+  sensitiveAreas: ["Payments", "Auth", "Data"],
+  environments: [...ENVIRONMENTS],
+  criteria: {}, // { [criterionId]: { on?: boolean, required?: boolean } } overrides to the built-in criteria
+});
+
 export const PHASES = ["Pre-release", "Go/no-go", "Deploy", "Verify", "After"];
 export const ROLE_KEYS = [
   ["releaseManager", "Release manager"], ["engOwner", "Engineering owner"], ["qaLead", "QA lead"],
@@ -40,6 +48,15 @@ const pad = (n) => String(n).padStart(2, "0");
 export const fmtLocal = (ms) => { const d = new Date(ms); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`; };
 const shift = (local, minutes) => { const t = parseLocal(local); return t === null ? "" : fmtLocal(t + minutes * 60000); };
 const dayAt = (now, offsetDays, hour) => { const d = new Date(now); d.setDate(d.getDate() + offsetDays); d.setHours(hour, 0, 0, 0); return fmtLocal(d.getTime()); };
+
+/** The first given weekday (0 = Sunday) at least minDays from now, at the given hour. */
+const nextWeekday = (now, minDays, dow, hour) => {
+  const d = new Date(now);
+  d.setDate(d.getDate() + minDays);
+  d.setHours(hour, 0, 0, 0);
+  while (d.getDay() !== dow) d.setDate(d.getDate() + 1);
+  return fmtLocal(d.getTime());
+};
 
 const t = (key, summary, type, priority, points, status, assignee, area, tags = {}) => ({
   key, summary, type, priority, points, status, assignee, area,
@@ -103,6 +120,8 @@ export function defaultPlan(now = Date.now()) {
     ],
     runbook: [],
     waivers: {},
+    settings: defaultSettings(),
+    customChecks: [],
   };
   plan.runbook = generateRunbook(plan);
   return plan;
@@ -122,6 +141,56 @@ export function applyTemplate(plan, type) {
   plan.signoffs = tpl.roles.map((role) => prior.get(role) || { role, who: who[role] || "", approved: false });
   plan.runbook = generateRunbook(plan);
   return plan;
+}
+
+/** An empty release: only sensible defaults. Dates land on a Tuesday 2 AM deploy at least a week out. */
+export function blankPlan(now = Date.now(), type = "Minor release") {
+  const deployAt = nextWeekday(now, 8, 2, 2);
+  const plan = {
+    release: { name: "", version: "", type, fixVersion: "", summary: "", customerImpact: "" },
+    people: Object.fromEntries(ROLE_KEYS.map(([k]) => [k, ""])),
+    extraPeople: [],
+    when: { freezeAt: shift(deployAt, -5 * 1440), meetingAt: shift(deployAt, -12 * 60), deployAt, windowHours: 2 },
+    where: { repo: "", baseRef: "", headRef: "", environments: ["staging", "prod-us"], services: "" },
+    how: { strategy: "canary", flagsDefaultOff: true, rollbackMinutes: 20, channel: "", rollbackPlan: "", dashboards: "", verification: "" },
+    scope: { velocity: 0, bigAt: 8, maxFiles: 400, maxLines: 15000 },
+    tickets: [],
+    signals: {
+      ci: { total: 0, realFailures: "", flaky: 0, pending: 0 },
+      openPrs: 0, failingOpenPrs: 0, mergedTotal: 0, lateMerged: 0, mergedUnapproved: 0,
+      filesChanged: 0, linesChanged: 0, commits: 0, authors: 0,
+      coverageDeltaPp: 0, coverageFloorPp: -1, p95DeltaPct: 0, p95BudgetPct: 5, securityCritical: 0, securityHigh: 0,
+    },
+    checks: { migration: "unset", rollback: "unset", notes: "unset", errorbudget: "unset" },
+    signoffs: [], runbook: [], waivers: {},
+    settings: defaultSettings(),
+    customChecks: [], // { id, name, required, state } checks a person defines and confirms
+  };
+  return applyTemplate(plan, type);
+}
+
+/**
+ * The next release in a series: keeps what rarely changes (people, repository, environments, rollout and
+ * rollback settings, budgets, which sign-offs are needed) and clears what belongs to one release
+ * (name, dates, tickets, quality signals, checks, approvals, waivers).
+ */
+export function nextPlan(prev, now = Date.now()) {
+  const keep = JSON.parse(JSON.stringify(prev));
+  const fresh = blankPlan(now, keep.release.type);
+  const next = {
+    ...fresh,
+    people: keep.people,
+    extraPeople: keep.extraPeople || [],
+    where: { ...keep.where, baseRef: "", headRef: "" },
+    how: { ...keep.how },
+    scope: keep.scope,
+    signals: { ...fresh.signals, coverageFloorPp: keep.signals.coverageFloorPp, p95BudgetPct: keep.signals.p95BudgetPct },
+    signoffs: keep.signoffs.map((x) => ({ ...x, approved: false })),
+    settings: keep.settings || defaultSettings(),
+    customChecks: (keep.customChecks || []).map((c) => ({ ...c, state: "unset" })),
+  };
+  next.runbook = generateRunbook(next);
+  return next;
 }
 
 const hasMigration = (plan) => plan.tickets.some((x) => x.tags?.migration) || (plan.checks.migration && plan.checks.migration !== "na");
@@ -206,7 +275,7 @@ export function planToSnapshot(plan, now = Date.now()) {
   }));
 
   return {
-    release: { name: plan.release.name, repo: plan.where.repo, freezeDate: toIso(plan.when.freezeAt) },
+    release: { name: plan.release.name || "Untitled release", repo: plan.where.repo, freezeDate: toIso(plan.when.freezeAt) },
     sources: { github: "ok", jira: "ok" },
     errors: {},
     data: {
@@ -233,15 +302,18 @@ export function planState(plan) {
     if (!v || v === "unset") continue;
     manual[id] = { state: v === "na" ? "pass" : v, by: plan.people.releaseManager, note: notes[v] || "" };
   }
+  for (const c of plan.customChecks || []) {
+    if (!c.state || c.state === "unset") continue;
+    manual[`custom-${c.id}`] = { state: c.state === "na" ? "pass" : c.state, by: plan.people.releaseManager, note: c.state === "na" ? notes.na : "" };
+  }
   return { manual, waivers: plan.waivers || {} };
 }
 
 /** Which criteria apply, and how strict they are. */
 export function planConfig(plan) {
   const sig = plan.signals;
-  return {
-    ci: { quarantine: ["quarantine"] },
-    criteria: [
+  const overrides = plan.settings?.criteria || {};
+  const builtIn = [
       { id: "p0", name: "No open P0 defects", type: "blockers_none", params: { severity: "P0" } },
       { id: "p1", name: "No open P1 defects", type: "blockers_none", params: { severity: "P1", failAs: "warn" } },
       { id: "points", name: "Story points complete", type: "points_complete", params: { minDonePct: 100, failBelowPct: 70 } },
@@ -260,79 +332,153 @@ export function planConfig(plan) {
       { id: "notes", name: "Release notes drafted", type: "draft_release", required: false },
       { id: "errorbudget", name: "Error budget above floor", type: "manual", source: "manual", required: false, params: { checkId: "errorbudget" } },
       { id: "runbook", name: "Pre-release steps on schedule", type: "runbook_ready", required: false },
-    ],
-  };
+  ];
+  const chosen = builtIn
+    .filter((c) => overrides[c.id]?.on !== false)
+    .map((c) => (overrides[c.id]?.required === undefined ? c : { ...c, required: overrides[c.id].required }));
+  const custom = (plan.customChecks || []).map((c) => ({
+    id: `custom-${c.id}`, name: c.name || "Untitled check", type: "manual", source: "manual", required: c.required !== false, params: { checkId: `custom-${c.id}` },
+  }));
+  return { ci: { quarantine: ["quarantine"] }, criteria: [...chosen, ...custom] };
 }
+
+/** The built-in criteria, for the settings screen to list. */
+export const criteriaCatalog = () => planConfig(blankPlan(0)).criteria.map((c) => ({ id: c.id, name: c.name, required: c.required !== false }));
 
 const fmtWhen = (local) => { const ms = parseLocal(local); return ms === null ? "not set" : new Date(ms).toLocaleString("en-US", { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }); };
+const joinList = (a) => (a.length <= 1 ? a.join("") : `${a.slice(0, -1).join(", ")} and ${a.at(-1)}`);
 
-/** The release brief as Markdown, for Slack, Confluence or a PDF. */
-export function briefMarkdown(plan, result, risk, now = Date.now()) {
-  const { verdict, criteria } = result;
-  const P = plan, pts = risk.points, fc = risk.forecast;
-  const lines = [];
-  const w = (s = "") => lines.push(s);
-
-  w(`# ${P.release.name} release brief`);
-  w();
-  w(`**Call: ${verdict.call}.** ${verdict.reason}  `);
-  w(`**Risk: ${risk.score}/100 (${risk.level}).** Generated ${fmtWhen(fmtLocal(now))}.`);
-  w();
-  w("## What");
-  w(`- Release: ${P.release.name} (${P.release.version}), ${P.release.type}`);
-  w(`- Jira fix version: ${P.release.fixVersion}`);
-  w(`- Changes: ${P.release.summary}`);
-  w(`- Customer impact: ${P.release.customerImpact}`);
-  w();
-  w("## Who");
-  for (const [k, label] of ROLE_KEYS) w(`- ${label}: ${P.people[k] || "not set"}`);
-  for (const x of P.extraPeople || []) w(`- ${x.label}: ${x.name || "not set"}`);
-  if ((P.signoffs || []).length) w(`- Sign-offs: ${P.signoffs.map((s) => `${s.role} (${s.who || "unassigned"}, ${s.approved ? "approved" : "pending"})`).join("; ")}`);
-  w();
-  w("## When");
-  w(`- Code freeze: ${fmtWhen(P.when.freezeAt)}`);
-  w(`- Go/no-go meeting: ${fmtWhen(P.when.meetingAt)}`);
-  w(`- Deploy: ${fmtWhen(P.when.deployAt)} for ${P.when.windowHours} hours`);
-  w();
-  w("## Where");
-  w(`- Repository: ${P.where.repo}, ${P.where.headRef} compared with ${P.where.baseRef}`);
-  w(`- Environments: ${P.where.environments.join(", ") || "none selected"}`);
-  w(`- Services: ${P.where.services || "not set"}`);
-  w();
-  w("## How");
-  w(`- Rollout: ${risk.ladder.steps.join("% → ")}%, ${risk.ladder.bake} minute bake. ${risk.ladder.note}`);
-  w(`- Feature flags default off: ${P.how.flagsDefaultOff ? "yes" : "no"}`);
-  w(`- Rollback (${P.how.rollbackMinutes} minutes): ${P.how.rollbackPlan}`);
-  w(`- Communication: ${P.how.channel}. Dashboards: ${P.how.dashboards}`);
-  w(`- Verification: ${P.how.verification}`);
-  w();
-  w("## Scope and story points");
-  w(`${pts.done} of ${pts.total} points done (${pts.pctDone}%). ${pts.inFlight} in flight, ${pts.todo} not started. ${fc.detail}`);
-  w();
-  w("| Status | Points |");
-  w("|---|---|");
-  for (const s of STATUSES) w(`| ${s} | ${pts.byStatus[s]} |`);
-  w();
-  w("## Risk analysis");
-  w("| Factor | Points | Detail |");
-  w("|---|---|---|");
-  for (const f of [...risk.factors].sort((a, b) => b.points - a.points)) w(`| ${f.label} | ${f.points}/${f.max} | ${f.detail} |`);
-  w();
-  if (risk.recommendations.length) {
-    w("### What to do about it");
-    risk.recommendations.forEach((r, i) => w(`${i + 1}. **${r.label}.** ${r.advice}`));
-    w();
-  }
-  w("## Go/no-go criteria");
+/**
+ * The report as data: sections made of paragraphs, lists, tables and checklists.
+ * Markdown and HTML are both rendered from this, so they always say the same thing.
+ */
+export function reportModel(plan, result, risk, now = Date.now()) {
+  const P = plan, { verdict, criteria } = result, pts = risk.points, fc = risk.forecast;
+  const name = P.release.name || "Untitled release";
+  const required = criteria.filter((c) => c.required);
+  const clear = required.filter((c) => c.effective === "pass" || c.effective === "waived").length;
+  const drivers = [...risk.factors].filter((f) => f.points > 0).sort((a, b) => b.points - a.points).slice(0, 3).map((f) => f.label.toLowerCase());
+  const holding = criteria.filter((c) => verdict.holding.includes(c.id));
   const order = { fail: 0, warn: 1, pending: 2, waived: 3, pass: 4 };
-  for (const c of [...criteria].sort((a, b) => order[a.effective] - order[b.effective])) {
-    w(`- [${c.effective === "pass" || c.effective === "waived" ? "x" : " "}] **${c.name}** (${c.effective}${c.required ? "" : ", advisory"}): ${c.detail}`);
-    if (c.waiver && c.effective === "waived") w(`  - Waived by ${c.waiver.approver}: ${c.waiver.reason}`);
+  const sections = [];
+  const sec = (title, ...blocks) => sections.push({ title, blocks });
+  const ul = (items) => ({ t: "ul", items });
+  const p = (text) => ({ t: "p", text });
+  const table = (head, rows) => ({ t: "table", head, rows });
+
+  sec("Summary",
+    p(`${name} is ${verdict.call}. ${verdict.reason} Risk is ${risk.score} out of 100 (${risk.level})${drivers.length ? `, driven mostly by ${joinList(drivers)}` : ""}. ` +
+      `${pts.total ? `${pts.done} of ${pts.total} story points are done (${pts.pctDone}%). ${fc.detail}` : "No story points have been entered."} ${clear} of ${required.length} required criteria are clear.`),
+    ...(holding.length ? [{ t: "h3", text: "What is holding the release" }, ul(holding.map((c) => `${c.name} (${c.effective}): ${c.detail}`))] : []));
+
+  sec("What", ul([
+    `Release: ${name}${P.release.version ? ` (${P.release.version})` : ""}, ${P.release.type}`,
+    `Jira fix version: ${P.release.fixVersion || "not set"}`,
+    `Changes: ${P.release.summary || "not set"}`,
+    `Customer impact: ${P.release.customerImpact || "not set"}`,
+  ]));
+
+  sec("Who", ul([
+    ...ROLE_KEYS.map(([k, label]) => `${label}: ${P.people[k] || "not set"}`),
+    ...(P.extraPeople || []).map((x) => `${x.label}: ${x.name || "not set"}`),
+    ...((P.signoffs || []).length ? [`Sign-offs: ${P.signoffs.map((s) => `${s.role} (${s.who || "unassigned"}, ${s.approved ? "approved" : "pending"})`).join("; ")}`] : []),
+  ]));
+
+  sec("When", ul([
+    `Code freeze: ${fmtWhen(P.when.freezeAt)}`,
+    `Go/no-go meeting: ${fmtWhen(P.when.meetingAt)}`,
+    `Deploy: ${fmtWhen(P.when.deployAt)} for ${P.when.windowHours} hours`,
+  ]));
+
+  sec("Where", ul([
+    `Repository: ${P.where.repo || "not set"}${P.where.headRef ? `, ${P.where.headRef} compared with ${P.where.baseRef || "not set"}` : ""}`,
+    `Environments: ${P.where.environments.join(", ") || "none selected"}`,
+    `Services: ${P.where.services || "not set"}`,
+  ]));
+
+  sec("How", ul([
+    `Rollout: ${risk.ladder.steps.join("% → ")}%, ${risk.ladder.bake} minute bake. ${risk.ladder.note}`,
+    `Feature flags default off: ${P.how.flagsDefaultOff ? "yes" : "no"}`,
+    `Rollback (${P.how.rollbackMinutes} minutes): ${P.how.rollbackPlan || "not written"}`,
+    `Communication: ${P.how.channel || "not set"}. Dashboards: ${P.how.dashboards || "not set"}`,
+    `Verification: ${P.how.verification || "not set"}`,
+  ]));
+
+  sec("Scope and story points",
+    p(pts.total ? `${pts.done} of ${pts.total} points done (${pts.pctDone}%). ${pts.inFlight} in flight, ${pts.todo} not started. ${fc.detail}` : "No story points have been entered."),
+    table(["Status", "Points"], STATUSES.map((st) => [st, String(pts.byStatus[st])])),
+    ...(Object.keys(pts.byArea).length ? [table(["Area", "Done", "Total"], Object.entries(pts.byArea).sort((a, b) => b[1].total - a[1].total).map(([a, v]) => [a, String(v.done), String(v.total)]))] : []));
+
+  sec("Risk analysis",
+    table(["Factor", "Points", "Detail"], [...risk.factors].sort((a, b) => b.points - a.points).map((f) => [f.label, `${f.points}/${f.max}`, f.detail])),
+    ...(risk.recommendations.length ? [{ t: "h3", text: "What to do about it" }, { t: "ol", items: risk.recommendations.map((r) => ({ bold: r.label, text: r.advice })) }] : []));
+
+  sec("Go/no-go criteria", {
+    t: "checks",
+    items: [...criteria].sort((a, b) => order[a.effective] - order[b.effective]).map((c) => ({
+      done: c.effective === "pass" || c.effective === "waived", name: c.name, status: c.effective, advisory: !c.required, detail: c.detail,
+      sub: c.waiver && c.effective === "waived" ? `Waived by ${c.waiver.approver}: ${c.waiver.reason}` : "",
+    })),
+  });
+
+  const waived = criteria.filter((c) => c.effective === "waived" && c.waiver);
+  if (waived.length) {
+    sec("Accepted risks", table(["Criterion", "Was", "Approved by", "Reason", "When"], waived.map((c) => [c.name, c.waiver.statusAtWaive || "", c.waiver.approver, c.waiver.reason, c.waiver.at ? new Date(c.waiver.at).toLocaleDateString("en-US", { month: "short", day: "numeric" }) : ""])));
   }
-  w();
-  w("## Runbook");
-  w("| When | Phase | Step | Owner | Status |");
-  w("|---|---|---|---|---|");
-  for (const r of P.runbook) w(`| ${fmtWhen(r.at)} | ${r.phase} | ${r.step} | ${r.owner || "unassigned"} | ${r.status} |`);
-  return lines.join("\n");
+
+  sec("Runbook", table(["When", "Phase", "Step", "Owner", "Status"], P.runbook.map((r) => [fmtWhen(r.at), r.phase, r.step, r.owner || "unassigned", r.status])));
+
+  return { title: `${name} release report`, name, call: verdict.call, reason: verdict.reason, riskScore: risk.score, riskLevel: risk.level, generated: fmtWhen(fmtLocal(now)), sections };
 }
+
+const cell = (v) => String(v ?? "").replace(/\|/g, "\\|").replace(/\s*\n\s*/g, " ");
+
+export function reportMarkdown(m) {
+  const out = [`# ${m.title}`, "", `**Call: ${m.call}.** ${m.reason}  `, `**Risk: ${m.riskScore}/100 (${m.riskLevel}).** Generated ${m.generated}.`, ""];
+  for (const s of m.sections) {
+    out.push(`## ${s.title}`, "");
+    for (const b of s.blocks) {
+      if (b.t === "p") out.push(b.text, "");
+      else if (b.t === "h3") out.push(`### ${b.text}`, "");
+      else if (b.t === "ul") out.push(...b.items.map((x) => `- ${x}`), "");
+      else if (b.t === "ol") out.push(...b.items.map((x, i) => `${i + 1}. **${x.bold}.** ${x.text}`), "");
+      else if (b.t === "table") out.push(`| ${b.head.join(" | ")} |`, `|${b.head.map(() => "---").join("|")}|`, ...b.rows.map((r) => `| ${r.map(cell).join(" | ")} |`), "");
+      else if (b.t === "checks") {
+        for (const c of b.items) {
+          out.push(`- [${c.done ? "x" : " "}] **${c.name}** (${c.status}${c.advisory ? ", advisory" : ""}): ${c.detail}`);
+          if (c.sub) out.push(`  - ${c.sub}`);
+        }
+        out.push("");
+      }
+    }
+  }
+  return out.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
+}
+
+const h = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+/** HTML for the report body. Plain semantic tags so it pastes cleanly into Docs, Word, Confluence or Slack. */
+export function reportHtml(m) {
+  const out = [`<h1>${h(m.title)}</h1>`, `<p class="call call-${m.call.toLowerCase().replace(/[^a-z]/g, "")}"><strong>Call: ${h(m.call)}.</strong> ${h(m.reason)}<br><strong>Risk: ${m.riskScore}/100 (${h(m.riskLevel)}).</strong> Generated ${h(m.generated)}.</p>`];
+  for (const s of m.sections) {
+    out.push(`<h2>${h(s.title)}</h2>`);
+    for (const b of s.blocks) {
+      if (b.t === "p") out.push(`<p>${h(b.text)}</p>`);
+      else if (b.t === "h3") out.push(`<h3>${h(b.text)}</h3>`);
+      else if (b.t === "ul") out.push(`<ul>${b.items.map((x) => `<li>${h(x)}</li>`).join("")}</ul>`);
+      else if (b.t === "ol") out.push(`<ol>${b.items.map((x) => `<li><strong>${h(x.bold)}.</strong> ${h(x.text)}</li>`).join("")}</ol>`);
+      else if (b.t === "table") out.push(`<table><thead><tr>${b.head.map((x) => `<th>${h(x)}</th>`).join("")}</tr></thead><tbody>${b.rows.map((r) => `<tr>${r.map((x) => `<td>${h(x)}</td>`).join("")}</tr>`).join("")}</tbody></table>`);
+      else if (b.t === "checks") out.push(`<ul class="checks">${b.items.map((c) => `<li>${c.done ? "☑" : "☐"} <strong>${h(c.name)}</strong> <em>(${h(c.status)}${c.advisory ? ", advisory" : ""})</em>: ${h(c.detail)}${c.sub ? `<br><small>${h(c.sub)}</small>` : ""}</li>`).join("")}</ul>`);
+    }
+  }
+  return out.join("\n");
+}
+
+/** A complete, printable HTML file: open it and use the browser's Print, then Save as PDF. */
+export function reportDocument(m) {
+  const css = `body{font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:#15201c;max-width:860px;margin:32px auto;padding:0 20px}h1{font-size:26px;margin:0 0 8px}h2{font-size:17px;margin:28px 0 8px;padding-bottom:4px;border-bottom:1px solid #d8e0dc}h3{font-size:14px;margin:16px 0 6px}table{border-collapse:collapse;width:100%;margin:8px 0;font-size:13px}th,td{border:1px solid #d8e0dc;padding:6px 8px;text-align:left;vertical-align:top}th{background:#f1f4f3}ul,ol{padding-left:22px}ul.checks{list-style:none;padding-left:0}ul.checks li{margin:6px 0}.call{padding:10px 14px;border-radius:8px;border:1px solid #d8e0dc;background:#f6f8f7}.call-nogo{background:#fbe2df;border-color:#b3261e}.call-hold{background:#fbefd2;border-color:#8f5a00}.call-go{background:#e0f2e8;border-color:#1b7a49}small{color:#5a6a64}@media print{body{margin:0;max-width:none}h2{break-after:avoid}table,li{break-inside:avoid}}`;
+  return `<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n<meta name="viewport" content="width=device-width, initial-scale=1">\n<title>${h(m.title)}</title>\n<style>${css}</style>\n</head>\n<body>\n${reportHtml(m)}\n</body>\n</html>\n`;
+}
+
+/** The report as Markdown. Kept under its original name for existing callers. */
+export const briefMarkdown = (plan, result, risk, now = Date.now()) => reportMarkdown(reportModel(plan, result, risk, now));

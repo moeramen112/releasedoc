@@ -235,3 +235,100 @@ test("clearing tickets and the runbook is safe for the engine, the risk model an
   assert.ok(risk.score >= 0 && risk.score <= 100);
   assert.doesNotThrow(() => briefMarkdown(p, r, risk, NOW));
 });
+
+// ---- reusing the tool for every release ----
+import { blankPlan, nextPlan } from "../src/plan.js";
+
+const run = (p) => evaluate(planToSnapshot(p, NOW), planConfig(p), planState(p));
+const crit = (r, id) => r.criteria.find((c) => c.id === id);
+
+test("a new release starts empty but prefilled: future dates, template sign-offs, a runbook", () => {
+  const p = blankPlan(NOW, "Minor release");
+  assert.equal(p.release.name, "");
+  assert.deepEqual(p.tickets, []);
+  assert.deepEqual(p.signoffs.map((s) => s.role), ["QA", "Product", "SRE on-call"]);
+  const [freeze, meeting, deploy] = [p.when.freezeAt, p.when.meetingAt, p.when.deployAt].map((x) => new Date(x).getTime());
+  assert.ok(deploy > NOW + 7 * 86400000, "deploy is at least a week out");
+  assert.ok(freeze < meeting && meeting < deploy, "freeze, then go/no-go, then deploy");
+  assert.ok(p.runbook.length >= 10);
+  assert.equal(blankPlan(NOW, "Hotfix").when.windowHours, 1);
+});
+
+test("a new release is never reported as ready: unknowns are pending, not passing", () => {
+  const p = blankPlan(NOW);
+  const r = run(p);
+  assert.notEqual(r.verdict.call, "GO");
+  assert.equal(crit(r, "points").status, "pending"); // no points entered is unknown, not done
+  assert.equal(crit(r, "migration").status, "pending");
+  assert.equal(crit(r, "rollback").status, "pending");
+  const risk = computeRisk(p, NOW);
+  assert.ok(risk.score >= 0 && risk.score <= 100);
+  assert.doesNotThrow(() => briefMarkdown(p, r, risk, NOW));
+});
+
+test("next release keeps what rarely changes and clears what belongs to one release", () => {
+  const prev = defaultPlan(NOW);
+  prev.waivers = { p0: { approver: "Sam", reason: "Hotfix Friday", statusAtWaive: "fail" } };
+  prev.customChecks = [{ id: "legal", name: "Legal review", required: true, state: "pass" }];
+  const snapshot = JSON.stringify(prev);
+  const next = nextPlan(prev, NOW);
+
+  assert.equal(JSON.stringify(prev), snapshot, "the previous release is not modified");
+  // kept
+  assert.equal(next.people.releaseManager, "Sam Okafor");
+  assert.equal(next.where.repo, "acme/web");
+  assert.deepEqual(next.where.environments, prev.where.environments);
+  assert.equal(next.how.rollbackPlan, prev.how.rollbackPlan);
+  assert.equal(next.how.strategy, prev.how.strategy);
+  assert.equal(next.scope.velocity, prev.scope.velocity);
+  assert.deepEqual(next.signoffs.map((s) => [s.role, s.who]), prev.signoffs.map((s) => [s.role, s.who]));
+  assert.equal(next.customChecks[0].name, "Legal review");
+  // cleared
+  assert.equal(next.release.name, "");
+  assert.deepEqual(next.tickets, []);
+  assert.equal(next.where.baseRef, "");
+  assert.equal(next.where.headRef, "");
+  assert.ok(next.signoffs.every((s) => s.approved === false));
+  assert.equal(next.customChecks[0].state, "unset");
+  assert.deepEqual(next.waivers, {});
+  assert.deepEqual(Object.values(next.checks), ["unset", "unset", "unset", "unset"]);
+  assert.equal(next.signals.lateMerged, 0);
+  // budgets are kept
+  assert.equal(next.signals.p95BudgetPct, prev.signals.p95BudgetPct);
+  // fresh schedule and a runbook with owners from the carried-over people
+  assert.ok(new Date(next.when.deployAt).getTime() > NOW);
+  assert.ok(next.runbook.length >= 10 && next.runbook.every((r) => r.status === "todo"));
+  assert.ok(next.runbook.some((r) => r.owner === "Sam Okafor"));
+});
+
+test("two releases are independent: editing one leaves the other alone", () => {
+  const a = defaultPlan(NOW), b = nextPlan(a, NOW);
+  b.tickets.push({ key: "REL-1", summary: "x", type: "Story", priority: "P2", points: 3, status: "To do", assignee: "", area: "Core", tags: {} });
+  b.people.releaseManager = "Priya Shah";
+  assert.equal(a.tickets.length, 14);
+  assert.equal(a.people.releaseManager, "Sam Okafor");
+});
+
+test("per-release settings: criteria can be switched off or made advisory", () => {
+  const p = cleanPlan();
+  p.settings.criteria = { migration: { on: false }, rollback: { required: false } };
+  const cfg = planConfig(p);
+  assert.ok(!cfg.criteria.some((c) => c.id === "migration"));
+  assert.equal(cfg.criteria.find((c) => c.id === "rollback").required, false);
+  // an advisory criterion that fails no longer blocks the call
+  p.checks.rollback = "fail";
+  const r = run(p);
+  assert.equal(crit(r, "rollback").status, "fail");
+  assert.equal(r.verdict.call, "GO");
+});
+
+test("custom checks hold the release until a person confirms them", () => {
+  const p = cleanPlan();
+  p.customChecks = [{ id: "legal", name: "Legal review done", required: true, state: "unset" }];
+  assert.equal(run(p).verdict.call, "HOLD");
+  assert.equal(crit(run(p), "custom-legal").name, "Legal review done");
+  p.customChecks[0].state = "pass";
+  assert.equal(run(p).verdict.call, "GO");
+  p.customChecks[0].state = "fail";
+  assert.equal(run(p).verdict.call, "NO-GO");
+});

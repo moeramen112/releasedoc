@@ -265,3 +265,9 @@ body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-a
 .addform { border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: var(--surface-2); }
 .addform .lab { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); font-weight: 600; margin-bottom: 4px; }
 .addform .err { color: var(--bad); font-size: 12px; }
+
+/* ---------- release library ---------- */
+.relbar { flex-direction: row; flex-wrap: wrap; align-items: flex-end; gap: 10px 14px; }
+.relpick { display: flex; flex-direction: column; gap: 4px; font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); font-weight: 600; flex: 1 1 260px; min-width: 0; }
+.relpick select { font: inherit; font-size: 14px; font-weight: 600; text-transform: none; letter-spacing: 0; color: var(--ink); background: var(--surface-2); border: 1px solid var(--line); border-radius: 6px; padding: 7px 9px; width: 100%; min-width: 0; }
+.relbar .msg { flex: 1 1 100%; }

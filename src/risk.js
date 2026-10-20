@@ -7,6 +7,7 @@ export const SENSITIVE_AREAS = ["Payments", "Auth", "Data"];
 
 export const num = (v, fallback = 0) => (v === "" || v === null || v === undefined || !Number.isFinite(Number(v)) ? fallback : Number(v));
 export const parseLocal = (s) => { const t = Date.parse(s); return Number.isNaN(t) ? null : t; };
+const joinAreas = (a) => a.join(", ");
 const round1 = (n) => Math.round(n * 10) / 10;
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 
@@ -132,12 +133,13 @@ export function computeRisk(plan, now = Date.now()) {
     "Estimate the remaining tickets so the forecast means something.");
 
   // 5. Sensitive areas (6)
-  const touched = tickets.filter((t) => SENSITIVE_AREAS.includes(t.area));
+  const sensitive = plan.settings?.sensitiveAreas ?? SENSITIVE_AREAS;
+  const touched = tickets.filter((t) => sensitive.includes(t.area));
   const openTouched = touched.filter((t) => t.status !== DONE).length;
   const untestedTouched = touched.filter((t) => t.tags?.untested).length;
   // Open work in these areas is the concern; finished work counts for less; missing tests count extra.
-  add("sensitive", "Payments, auth and data changes", 6, openTouched * 2 + (touched.length - openTouched) * 0.5 + untestedTouched * 2,
-    touched.length ? `${plural(touched.length, "ticket touches", "tickets touch")} ${SENSITIVE_AREAS.join(", ")} (${openTouched} still open)${untestedTouched ? `; ${untestedTouched} flagged as lacking tests` : ""}.` : "No ticket touches payments, auth or data.",
+  add("sensitive", "Changes in sensitive areas", 6, openTouched * 2 + (touched.length - openTouched) * 0.5 + untestedTouched * 2,
+    touched.length ? `${plural(touched.length, "ticket touches", "tickets touch")} ${joinAreas(sensitive)} (${openTouched} still open)${untestedTouched ? `; ${untestedTouched} flagged as lacking tests` : ""}.` : (sensitive.length ? `No ticket touches ${joinAreas(sensitive)}.` : "No sensitive areas are configured for this project."),
     "Ask for a second reviewer and an explicit test plan on every change in these areas, and watch their dashboards first after deploy.");
 
   // 6. Change size (7)

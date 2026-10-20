@@ -22,6 +22,19 @@
       </nav>
     </header>
 
+    <section class="panel relbar" aria-label="Releases">
+      <label class="relpick" for="rel-select">Release<select id="rel-select"></select></label>
+      <div class="toolbar">
+        <button class="btn small primary" type="button" data-act="rel-new" title="Start an empty release">New release</button>
+        <button class="btn small" type="button" data-act="rel-next" title="Keeps people, repository, environments and rollout settings. Clears tickets, signals and approvals.">Start next release</button>
+        <button class="btn small" type="button" data-act="rel-dup">Duplicate</button>
+        <button class="btn small" type="button" data-act="rel-delete">Delete</button>
+        <button class="btn small" type="button" data-act="rel-example">Load example</button>
+        <button class="btn small" type="button" data-act="import">Import</button>
+      </div>
+      <span class="msg" id="rel-msg" role="status"></span>
+    </section>
+
     <div class="sumbar" id="sumbar" aria-live="polite"></div>
 
     <div class="plan">

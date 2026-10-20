@@ -2,19 +2,20 @@
 // The same engine and risk model the server uses run here, in the browser.
 import { evaluate } from "/engine.js";
 import { computeRisk } from "/risk.js";
-import { defaultPlan, applyTemplate, generateRunbook, planToSnapshot, planState, planConfig, briefMarkdown, TYPES, PRIORITIES, TICKET_TYPES, STATUSES, AREAS, ENVIRONMENTS, STRATEGIES, CHECK_STATES, PHASES, ROLE_KEYS, TEMPLATES } from "/plan.js";
+import { defaultPlan, blankPlan, nextPlan, applyTemplate, generateRunbook, planToSnapshot, planState, planConfig, briefMarkdown, TYPES, PRIORITIES, TICKET_TYPES, STATUSES, AREAS, ENVIRONMENTS, STRATEGIES, CHECK_STATES, PHASES, ROLE_KEYS, TEMPLATES } from "/plan.js";
 
 const $ = (s, r = document) => r.querySelector(s);
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const KEY = "rr.plan.v1";
+const OLD_KEY = "rr.plan.v1"; // the single plan the first version of the planner saved
+const LIB_KEY = "rr.releases.v1";
 const STANDALONE = typeof window !== "undefined" && window.__STANDALONE === true;
 const RUN_STATUS = ["todo", "doing", "done", "blocked"];
 const LABEL = { pass: "Pass", warn: "At risk", fail: "Failing", pending: "Pending", waived: "Waived" };
 const chip = (s) => `<span class="chip s-${s}"><i></i>${LABEL[s]}</span>`;
 
 const store = {
-  get() { try { return localStorage.getItem(KEY); } catch { return null; } },
-  set(v) { try { localStorage.setItem(KEY, v); } catch { /* storage can be unavailable */ } },
+  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch { /* storage can be unavailable */ } },
 };
 
 /* ---------- plan state ---------- */
@@ -33,18 +34,37 @@ function fillDefaults(def, val) {
   for (const k of Object.keys(val || {})) if (!(k in out)) out[k] = val[k];
   return out;
 }
-function loadPlan() {
+/* ---------- the release library: every release you have entered, saved in this browser ---------- */
+
+const newId = () => "r" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+const validPlan = (p) => Boolean(p && Array.isArray(p.tickets) && p.release);
+
+function loadLib() {
   try {
-    const raw = store.get();
+    const raw = store.get(LIB_KEY);
     if (raw) {
-      const p = JSON.parse(raw);
-      if (p && Array.isArray(p.tickets) && p.release) return fillDefaults(defaultPlan(), p);
+      const l = JSON.parse(raw);
+      const order = (l.order || []).filter((id) => validPlan(l.items?.[id]));
+      if (order.length) {
+        const items = {};
+        for (const id of order) items[id] = { ...fillDefaults(defaultPlan(), l.items[id]), id };
+        return { current: items[l.current] ? l.current : order[0], order, items };
+      }
+    }
+    const old = store.get(OLD_KEY); // keep whatever the first version saved
+    if (old) {
+      const p = JSON.parse(old);
+      if (validPlan(p)) { const id = newId(); return { current: id, order: [id], items: { [id]: { ...fillDefaults(defaultPlan(), p), id } } }; }
     }
   } catch { /* fall through to the example */ }
-  return defaultPlan();
+  const id = newId();
+  return { current: id, order: [id], items: { [id]: { ...defaultPlan(), id } } };
 }
 
-let P = loadPlan();
+let lib = loadLib();
+let P = lib.items[lib.current];
+function saveLib() { lib.items[lib.current] = P; store.set(LIB_KEY, JSON.stringify(lib)); }
+
 let openWaive = null;
 let waiveError = "";
 let integrations = { jira: false, server: false };
@@ -58,14 +78,14 @@ const CHECK_OPTS = CHECK_STATES;
 
 const SECTIONS = [
   { id: "what", title: "What is shipping", hint: "Name, type and what customers will notice.", fields: [
-    { p: "release.name", l: "Release name" },
-    { p: "release.version", l: "Version", mono: true },
+    { p: "release.name", l: "Release name", ph: "e.g. Release 4.13" },
+    { p: "release.version", l: "Version", mono: true, ph: "4.13.0" },
     { p: "release.type", l: "Release type", t: "select", o: opt(TYPES), after: "tpl" },
-    { p: "release.fixVersion", l: "Jira fix version", mono: true },
+    { p: "release.fixVersion", l: "Jira fix version", mono: true, ph: "4.13" },
     { p: "release.summary", l: "What changes", t: "textarea", wide: true },
     { p: "release.customerImpact", l: "Customer impact", t: "textarea", wide: true },
   ] },
-  { id: "who", title: "Who is involved", hint: "Named owners flow into the runbook and the brief.", fields: ROLE_KEYS.map(([k, l]) => ({ p: `people.${k}`, l })) },
+  { id: "who", title: "Who is involved", hint: "Named owners flow into the runbook and the brief.", fields: ROLE_KEYS.map(([k, l]) => ({ p: `people.${k}`, l, ph: "Name" })) },
   { id: "when", title: "When", hint: "Dates drive the runbook times and the deploy timing risk.", fields: [
     { p: "when.freezeAt", l: "Code freeze", t: "datetime" },
     { p: "when.meetingAt", l: "Go/no-go meeting", t: "datetime" },
@@ -73,16 +93,16 @@ const SECTIONS = [
     { p: "when.windowHours", l: "Deploy window", t: "number", suffix: "hours" },
   ] },
   { id: "where", title: "Where", hint: "Repository, branches, environments and services in scope.", fields: [
-    { p: "where.repo", l: "Repository", mono: true },
-    { p: "where.baseRef", l: "Compare from (tag)", mono: true },
-    { p: "where.headRef", l: "Release branch", mono: true },
+    { p: "where.repo", l: "Repository", mono: true, ph: "owner/name" },
+    { p: "where.baseRef", l: "Compare from (tag)", mono: true, ph: "v4.12.0" },
+    { p: "where.headRef", l: "Release branch", mono: true, ph: "release/4.13" },
     { p: "where.environments", l: "Environments", t: "multi", o: opt(ENVIRONMENTS), wide: true },
-    { p: "where.services", l: "Services affected", wide: true },
+    { p: "where.services", l: "Services affected", wide: true, ph: "e.g. orders-api, billing, web-app" },
   ] },
   { id: "how", title: "How it ships and how it comes back", hint: "Rollout, flags and the rollback plan.", fields: [
     { p: "how.strategy", l: "Rollout strategy", t: "select", o: STRATEGIES },
     { p: "how.rollbackMinutes", l: "Rollback target", t: "number", suffix: "minutes" },
-    { p: "how.channel", l: "Release channel", mono: true },
+    { p: "how.channel", l: "Release channel", mono: true, ph: "#release-413" },
     { p: "how.flagsDefaultOff", l: "New features behind flags, default off", t: "check" },
     { p: "how.rollbackPlan", l: "Rollback plan", t: "textarea", wide: true },
     { p: "how.dashboards", l: "Dashboards to watch", wide: true },
@@ -154,7 +174,7 @@ function fieldHtml(f) {
   else if (f.t === "textarea") control = `<textarea id="${id}" data-p="${f.p}" rows="3">${esc(v)}</textarea>`;
   else if (f.t === "number") control = `<input id="${id}" type="number" step="any" data-p="${f.p}" value="${esc(v)}">`;
   else if (f.t === "datetime") control = `<input id="${id}" type="datetime-local" data-p="${f.p}" value="${esc(v)}">`;
-  else control = `<input id="${id}" class="${mono.trim()}" type="text" data-p="${f.p}" value="${esc(v)}" autocomplete="off">`;
+  else control = `<input id="${id}" class="${mono.trim()}" type="text" data-p="${f.p}" value="${esc(v)}" placeholder="${esc(f.ph || "")}" autocomplete="off">`;
   const after = f.after === "tpl"
     ? `<div class="row-actions"><button class="btn small" type="button" data-act="apply-template">Apply defaults for this type</button><span class="tpl-note">Sets rollout, window, rollback time, sign-off roles and the runbook.</span></div>`
     : f.suffix ? `<span class="suffix">${esc(f.suffix)}</span>` : "";
@@ -277,6 +297,68 @@ function sayUndo(id, text, what) {
   if (el) { el.className = "msg"; el.innerHTML = `${esc(text)} <button class="btn small" type="button" data-act="undo-clear" data-what="${what}">Undo</button>`; }
 }
 
+
+/* ---------- library actions ---------- */
+
+function relLabel(p, now) {
+  let tail = "";
+  try {
+    const r = evaluate(planToSnapshot(p, now), planConfig(p), planState(p));
+    tail = ` · ${r.verdict.call} · risk ${computeRisk(p, now).score}`;
+  } catch { /* a broken plan still gets a name */ }
+  return (p.release.name || "Untitled release") + tail;
+}
+
+function renderRelSelect() {
+  const now = Date.now(), sel = $("#rel-select");
+  if (!sel) return;
+  sel.innerHTML = lib.order.map((id) => `<option value="${esc(id)}"${id === lib.current ? " selected" : ""}>${esc(relLabel(id === lib.current ? P : lib.items[id], now))}</option>`).join("");
+}
+
+function showRelease() {
+  openWaive = null; waiveError = "";
+  saveLib();
+  renderInputs();
+  renderResults();
+}
+
+function openRelease(id) {
+  if (!lib.items[id]) return;
+  lib.items[lib.current] = P;
+  lib.current = id;
+  P = lib.items[id];
+  showRelease();
+}
+
+function addRelease(plan) {
+  plan.id = newId();
+  lib.items[lib.current] = P;
+  lib.items[plan.id] = plan;
+  lib.order.push(plan.id);
+  lib.current = plan.id;
+  P = plan;
+  showRelease();
+}
+
+let lastDeleted = null;
+function deleteRelease() {
+  const id = lib.current, idx = lib.order.indexOf(id), name = P.release.name || "Untitled release";
+  lastDeleted = { plan: P, idx };
+  lib.order.splice(idx, 1);
+  delete lib.items[id];
+  if (!lib.order.length) { const b = { ...blankPlan(Date.now(), P.release.type), id: newId() }; lib.items[b.id] = b; lib.order.push(b.id); }
+  lib.current = lib.order[Math.min(idx, lib.order.length - 1)];
+  P = lib.items[lib.current];
+  showRelease();
+  sayRel(`Deleted “${name}”.`, true);
+}
+
+function sayRel(text, undo = false, kind = "") {
+  const el = $("#rel-msg");
+  el.className = "msg " + kind;
+  el.innerHTML = esc(text) + (undo ? ` <button class="btn small" type="button" data-act="rel-undo">Undo</button>` : "");
+}
+
 /* ---------- results ---------- */
 
 function compute() {
@@ -302,7 +384,7 @@ function renderSumbar({ result, risk, now }) {
     kv(`${risk.points.pctDone}%`, `Points done · ${risk.points.done}/${risk.points.total}`) +
     kv(days, "To deploy") +
     kv(`${v.counts.fail + v.counts.warn + v.counts.pending}`, "Criteria open") +
-    `<span class="spacer"></span><div class="toolbar">${STANDALONE ? `<button class="btn small" type="button" data-act="copy-json">Copy plan JSON</button>` : `<button class="btn small" type="button" data-act="export">Export plan</button>`}<button class="btn small" type="button" data-act="import">Import plan</button><button class="btn small" type="button" data-act="reset">Reset to example</button></div>`;
+    `<span class="spacer"></span><div class="toolbar">${STANDALONE ? `<button class="btn small" type="button" data-act="copy-json">Copy plan JSON</button>` : `<button class="btn small" type="button" data-act="export">Export plan</button>`}</div>`;
 }
 
 function renderVerdict({ result }) {
@@ -378,7 +460,10 @@ function renderResults() {
     return;
   }
   renderSumbar(last);
-  $("#results").innerHTML = renderVerdict(last) + renderRisk(last) + renderPoints(last) + renderCriteria(last) + renderBrief(last);
+  const fresh = !P.release.name.trim() && P.tickets.length === 0 && !Number(P.signals.ci.total);
+  const note = fresh ? `<div class="banner"><strong>New release.</strong><span>Name it and set the dates on the left, then add tickets or pull them from Jira. The call stays HOLD until the checks have data, and anything unknown counts as risk.</span></div>` : "";
+  renderRelSelect();
+  $("#results").innerHTML = note + renderVerdict(last) + renderRisk(last) + renderPoints(last) + renderCriteria(last) + renderBrief(last);
   const p = last.risk.points;
   const sum = $("#tk-sum");
   if (sum) sum.textContent = `${p.tickets} tickets · ${p.total} points · ${p.done} done`;
@@ -389,7 +474,7 @@ function renderResults() {
 let raf = 0, saveTimer = 0;
 function changed() {
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => store.set(JSON.stringify(P)), 250);
+  saveTimer = setTimeout(saveLib, 250);
   renderClear();
   cancelAnimationFrame(raf);
   raf = requestAnimationFrame(renderResults);
@@ -513,7 +598,35 @@ document.addEventListener("click", async (e) => {
   }
   else if (act === "export") download(`${slug()}-plan.json`, JSON.stringify(P, null, 2), "application/json");
   else if (act === "import") $("#import-file").click();
-  else if (act === "reset") { P = defaultPlan(); store.set(JSON.stringify(P)); openWaive = null; renderInputs(); renderResults(); }
+  else if (act === "rel-new") {
+    addRelease(blankPlan(Date.now(), P.release.type));
+    sayRel("New release. Name it and set the dates, then add tickets or pull them from Jira.", false, "ok");
+    $("#f-release-name")?.focus();
+  }
+  else if (act === "rel-next") {
+    const from = P.release.name || "Untitled release";
+    addRelease(nextPlan(P, Date.now()));
+    sayRel(`Started the next release from “${from}”. People, environments and rollout settings carried over. Tickets, signals, checks and approvals are cleared.`, false, "ok");
+    $("#f-release-name")?.focus();
+  }
+  else if (act === "rel-dup") {
+    const c = JSON.parse(JSON.stringify(P));
+    c.release.name = `Copy of ${P.release.name || "Untitled release"}`;
+    addRelease(c);
+    sayRel("Duplicated. Changes here do not affect the original.", false, "ok");
+  }
+  else if (act === "rel-example") { addRelease(defaultPlan()); sayRel("Loaded the example release as a new entry.", false, "ok"); }
+  else if (act === "rel-delete") deleteRelease();
+  else if (act === "rel-undo") {
+    if (lastDeleted) {
+      const { plan, idx } = lastDeleted; lastDeleted = null;
+      lib.items[lib.current] = P;
+      lib.items[plan.id] = plan;
+      lib.order.splice(Math.min(idx, lib.order.length), 0, plan.id);
+      openRelease(plan.id);
+      sayRel(`Restored “${plan.release.name || "Untitled release"}”.`, false, "ok");
+    }
+  }
 });
 
 document.addEventListener("submit", (e) => {
@@ -548,6 +661,8 @@ document.addEventListener("submit", (e) => {
   changed();
 });
 
+$("#rel-select").addEventListener("change", (e) => openRelease(e.target.value));
+
 $("#import-file").addEventListener("change", async (e) => {
   const file = e.target.files[0];
   e.target.value = "";
@@ -555,9 +670,8 @@ $("#import-file").addEventListener("change", async (e) => {
   try {
     const p = JSON.parse(await file.text());
     if (!p || !Array.isArray(p.tickets) || !p.release) throw new Error("That file is not a release plan.");
-    P = fillDefaults(defaultPlan(), p);
-    store.set(JSON.stringify(P));
-    renderInputs(); renderResults();
+    addRelease(fillDefaults(defaultPlan(), p));
+    sayRel(`Imported “${P.release.name || "Untitled release"}” as a new release.`, false, "ok");
   } catch (err) {
     $("#results").insertAdjacentHTML("afterbegin", `<div class="banner bad" role="alert"><strong>Could not import.</strong><span>${esc(err.message)}</span></div>`);
   }
@@ -568,6 +682,7 @@ $("#import-file").addEventListener("change", async (e) => {
 (async function init() {
   renderInputs();
   renderResults();
+  saveLib();
   if (STANDALONE) return; // no server behind a single-file copy
   try {
     const res = await fetch("/api/config");

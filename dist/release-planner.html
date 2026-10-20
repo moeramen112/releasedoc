@@ -270,6 +270,12 @@ body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-a
 .addform .lab { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); font-weight: 600; margin-bottom: 4px; }
 .addform .err { color: var(--bad); font-size: 12px; }
 
+/* ---------- release library ---------- */
+.relbar { flex-direction: row; flex-wrap: wrap; align-items: flex-end; gap: 10px 14px; }
+.relpick { display: flex; flex-direction: column; gap: 4px; font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); font-weight: 600; flex: 1 1 260px; min-width: 0; }
+.relpick select { font: inherit; font-size: 14px; font-weight: 600; text-transform: none; letter-spacing: 0; color: var(--ink); background: var(--surface-2); border: 1px solid var(--line); border-radius: 6px; padding: 7px 9px; width: 100%; min-width: 0; }
+.relbar .msg { flex: 1 1 100%; }
+
 </style>
 <div class="wrap">
     <header class="top">
@@ -279,6 +285,19 @@ body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-a
       </div>
       
     </header>
+
+    <section class="panel relbar" aria-label="Releases">
+      <label class="relpick" for="rel-select">Release<select id="rel-select"></select></label>
+      <div class="toolbar">
+        <button class="btn small primary" type="button" data-act="rel-new" title="Start an empty release">New release</button>
+        <button class="btn small" type="button" data-act="rel-next" title="Keeps people, repository, environments and rollout settings. Clears tickets, signals and approvals.">Start next release</button>
+        <button class="btn small" type="button" data-act="rel-dup">Duplicate</button>
+        <button class="btn small" type="button" data-act="rel-delete">Delete</button>
+        <button class="btn small" type="button" data-act="rel-example">Load example</button>
+        <button class="btn small" type="button" data-act="import">Import</button>
+      </div>
+      <span class="msg" id="rel-msg" role="status"></span>
+    </section>
 
     <div class="sumbar" id="sumbar" aria-live="polite"></div>
 
@@ -550,6 +569,7 @@ const SENSITIVE_AREAS = ["Payments", "Auth", "Data"];
 
 const num = (v, fallback = 0) => (v === "" || v === null || v === undefined || !Number.isFinite(Number(v)) ? fallback : Number(v));
 const parseLocal = (s) => { const t = Date.parse(s); return Number.isNaN(t) ? null : t; };
+const joinAreas = (a) => a.join(", ");
 const round1 = (n) => Math.round(n * 10) / 10;
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 
@@ -675,12 +695,13 @@ function computeRisk(plan, now = Date.now()) {
     "Estimate the remaining tickets so the forecast means something.");
 
   // 5. Sensitive areas (6)
-  const touched = tickets.filter((t) => SENSITIVE_AREAS.includes(t.area));
+  const sensitive = plan.settings?.sensitiveAreas ?? SENSITIVE_AREAS;
+  const touched = tickets.filter((t) => sensitive.includes(t.area));
   const openTouched = touched.filter((t) => t.status !== DONE).length;
   const untestedTouched = touched.filter((t) => t.tags?.untested).length;
   // Open work in these areas is the concern; finished work counts for less; missing tests count extra.
-  add("sensitive", "Payments, auth and data changes", 6, openTouched * 2 + (touched.length - openTouched) * 0.5 + untestedTouched * 2,
-    touched.length ? `${plural(touched.length, "ticket touches", "tickets touch")} ${SENSITIVE_AREAS.join(", ")} (${openTouched} still open)${untestedTouched ? `; ${untestedTouched} flagged as lacking tests` : ""}.` : "No ticket touches payments, auth or data.",
+  add("sensitive", "Changes in sensitive areas", 6, openTouched * 2 + (touched.length - openTouched) * 0.5 + untestedTouched * 2,
+    touched.length ? `${plural(touched.length, "ticket touches", "tickets touch")} ${joinAreas(sensitive)} (${openTouched} still open)${untestedTouched ? `; ${untestedTouched} flagged as lacking tests` : ""}.` : (sensitive.length ? `No ticket touches ${joinAreas(sensitive)}.` : "No sensitive areas are configured for this project."),
     "Ask for a second reviewer and an explicit test plan on every change in these areas, and watch their dashboards first after deploy.");
 
   // 6. Change size (7)
@@ -784,6 +805,14 @@ const CHECK_STATES = [
   { v: "fail", l: "Failed" },
   { v: "na", l: "Not applicable" },
 ];
+/** Lists and switches a project can change. Everything the forms offer comes from here, not from code. */
+const defaultSettings = () => ({
+  areas: [...AREAS],
+  sensitiveAreas: ["Payments", "Auth", "Data"],
+  environments: [...ENVIRONMENTS],
+  criteria: {}, // { [criterionId]: { on?: boolean, required?: boolean } } overrides to the built-in criteria
+});
+
 const PHASES = ["Pre-release", "Go/no-go", "Deploy", "Verify", "After"];
 const ROLE_KEYS = [
   ["releaseManager", "Release manager"], ["engOwner", "Engineering owner"], ["qaLead", "QA lead"],
@@ -803,6 +832,15 @@ const pad = (n) => String(n).padStart(2, "0");
 const fmtLocal = (ms) => { const d = new Date(ms); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`; };
 const shift = (local, minutes) => { const t = parseLocal(local); return t === null ? "" : fmtLocal(t + minutes * 60000); };
 const dayAt = (now, offsetDays, hour) => { const d = new Date(now); d.setDate(d.getDate() + offsetDays); d.setHours(hour, 0, 0, 0); return fmtLocal(d.getTime()); };
+
+/** The first given weekday (0 = Sunday) at least minDays from now, at the given hour. */
+const nextWeekday = (now, minDays, dow, hour) => {
+  const d = new Date(now);
+  d.setDate(d.getDate() + minDays);
+  d.setHours(hour, 0, 0, 0);
+  while (d.getDay() !== dow) d.setDate(d.getDate() + 1);
+  return fmtLocal(d.getTime());
+};
 
 const t = (key, summary, type, priority, points, status, assignee, area, tags = {}) => ({
   key, summary, type, priority, points, status, assignee, area,
@@ -866,6 +904,8 @@ function defaultPlan(now = Date.now()) {
     ],
     runbook: [],
     waivers: {},
+    settings: defaultSettings(),
+    customChecks: [],
   };
   plan.runbook = generateRunbook(plan);
   return plan;
@@ -885,6 +925,56 @@ function applyTemplate(plan, type) {
   plan.signoffs = tpl.roles.map((role) => prior.get(role) || { role, who: who[role] || "", approved: false });
   plan.runbook = generateRunbook(plan);
   return plan;
+}
+
+/** An empty release: only sensible defaults. Dates land on a Tuesday 2 AM deploy at least a week out. */
+function blankPlan(now = Date.now(), type = "Minor release") {
+  const deployAt = nextWeekday(now, 8, 2, 2);
+  const plan = {
+    release: { name: "", version: "", type, fixVersion: "", summary: "", customerImpact: "" },
+    people: Object.fromEntries(ROLE_KEYS.map(([k]) => [k, ""])),
+    extraPeople: [],
+    when: { freezeAt: shift(deployAt, -5 * 1440), meetingAt: shift(deployAt, -12 * 60), deployAt, windowHours: 2 },
+    where: { repo: "", baseRef: "", headRef: "", environments: ["staging", "prod-us"], services: "" },
+    how: { strategy: "canary", flagsDefaultOff: true, rollbackMinutes: 20, channel: "", rollbackPlan: "", dashboards: "", verification: "" },
+    scope: { velocity: 0, bigAt: 8, maxFiles: 400, maxLines: 15000 },
+    tickets: [],
+    signals: {
+      ci: { total: 0, realFailures: "", flaky: 0, pending: 0 },
+      openPrs: 0, failingOpenPrs: 0, mergedTotal: 0, lateMerged: 0, mergedUnapproved: 0,
+      filesChanged: 0, linesChanged: 0, commits: 0, authors: 0,
+      coverageDeltaPp: 0, coverageFloorPp: -1, p95DeltaPct: 0, p95BudgetPct: 5, securityCritical: 0, securityHigh: 0,
+    },
+    checks: { migration: "unset", rollback: "unset", notes: "unset", errorbudget: "unset" },
+    signoffs: [], runbook: [], waivers: {},
+    settings: defaultSettings(),
+    customChecks: [], // { id, name, required, state } checks a person defines and confirms
+  };
+  return applyTemplate(plan, type);
+}
+
+/**
+ * The next release in a series: keeps what rarely changes (people, repository, environments, rollout and
+ * rollback settings, budgets, which sign-offs are needed) and clears what belongs to one release
+ * (name, dates, tickets, quality signals, checks, approvals, waivers).
+ */
+function nextPlan(prev, now = Date.now()) {
+  const keep = JSON.parse(JSON.stringify(prev));
+  const fresh = blankPlan(now, keep.release.type);
+  const next = {
+    ...fresh,
+    people: keep.people,
+    extraPeople: keep.extraPeople || [],
+    where: { ...keep.where, baseRef: "", headRef: "" },
+    how: { ...keep.how },
+    scope: keep.scope,
+    signals: { ...fresh.signals, coverageFloorPp: keep.signals.coverageFloorPp, p95BudgetPct: keep.signals.p95BudgetPct },
+    signoffs: keep.signoffs.map((x) => ({ ...x, approved: false })),
+    settings: keep.settings || defaultSettings(),
+    customChecks: (keep.customChecks || []).map((c) => ({ ...c, state: "unset" })),
+  };
+  next.runbook = generateRunbook(next);
+  return next;
 }
 
 const hasMigration = (plan) => plan.tickets.some((x) => x.tags?.migration) || (plan.checks.migration && plan.checks.migration !== "na");
@@ -969,7 +1059,7 @@ function planToSnapshot(plan, now = Date.now()) {
   }));
 
   return {
-    release: { name: plan.release.name, repo: plan.where.repo, freezeDate: toIso(plan.when.freezeAt) },
+    release: { name: plan.release.name || "Untitled release", repo: plan.where.repo, freezeDate: toIso(plan.when.freezeAt) },
     sources: { github: "ok", jira: "ok" },
     errors: {},
     data: {
@@ -996,15 +1086,18 @@ function planState(plan) {
     if (!v || v === "unset") continue;
     manual[id] = { state: v === "na" ? "pass" : v, by: plan.people.releaseManager, note: notes[v] || "" };
   }
+  for (const c of plan.customChecks || []) {
+    if (!c.state || c.state === "unset") continue;
+    manual[`custom-${c.id}`] = { state: c.state === "na" ? "pass" : c.state, by: plan.people.releaseManager, note: c.state === "na" ? notes.na : "" };
+  }
   return { manual, waivers: plan.waivers || {} };
 }
 
 /** Which criteria apply, and how strict they are. */
 function planConfig(plan) {
   const sig = plan.signals;
-  return {
-    ci: { quarantine: ["quarantine"] },
-    criteria: [
+  const overrides = plan.settings?.criteria || {};
+  const builtIn = [
       { id: "p0", name: "No open P0 defects", type: "blockers_none", params: { severity: "P0" } },
       { id: "p1", name: "No open P1 defects", type: "blockers_none", params: { severity: "P1", failAs: "warn" } },
       { id: "points", name: "Story points complete", type: "points_complete", params: { minDonePct: 100, failBelowPct: 70 } },
@@ -1023,84 +1116,158 @@ function planConfig(plan) {
       { id: "notes", name: "Release notes drafted", type: "draft_release", required: false },
       { id: "errorbudget", name: "Error budget above floor", type: "manual", source: "manual", required: false, params: { checkId: "errorbudget" } },
       { id: "runbook", name: "Pre-release steps on schedule", type: "runbook_ready", required: false },
-    ],
-  };
+  ];
+  const chosen = builtIn
+    .filter((c) => overrides[c.id]?.on !== false)
+    .map((c) => (overrides[c.id]?.required === undefined ? c : { ...c, required: overrides[c.id].required }));
+  const custom = (plan.customChecks || []).map((c) => ({
+    id: `custom-${c.id}`, name: c.name || "Untitled check", type: "manual", source: "manual", required: c.required !== false, params: { checkId: `custom-${c.id}` },
+  }));
+  return { ci: { quarantine: ["quarantine"] }, criteria: [...chosen, ...custom] };
 }
+
+/** The built-in criteria, for the settings screen to list. */
+const criteriaCatalog = () => planConfig(blankPlan(0)).criteria.map((c) => ({ id: c.id, name: c.name, required: c.required !== false }));
 
 const fmtWhen = (local) => { const ms = parseLocal(local); return ms === null ? "not set" : new Date(ms).toLocaleString("en-US", { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }); };
+const joinList = (a) => (a.length <= 1 ? a.join("") : `${a.slice(0, -1).join(", ")} and ${a.at(-1)}`);
 
-/** The release brief as Markdown, for Slack, Confluence or a PDF. */
-function briefMarkdown(plan, result, risk, now = Date.now()) {
-  const { verdict, criteria } = result;
-  const P = plan, pts = risk.points, fc = risk.forecast;
-  const lines = [];
-  const w = (s = "") => lines.push(s);
-
-  w(`# ${P.release.name} release brief`);
-  w();
-  w(`**Call: ${verdict.call}.** ${verdict.reason}  `);
-  w(`**Risk: ${risk.score}/100 (${risk.level}).** Generated ${fmtWhen(fmtLocal(now))}.`);
-  w();
-  w("## What");
-  w(`- Release: ${P.release.name} (${P.release.version}), ${P.release.type}`);
-  w(`- Jira fix version: ${P.release.fixVersion}`);
-  w(`- Changes: ${P.release.summary}`);
-  w(`- Customer impact: ${P.release.customerImpact}`);
-  w();
-  w("## Who");
-  for (const [k, label] of ROLE_KEYS) w(`- ${label}: ${P.people[k] || "not set"}`);
-  for (const x of P.extraPeople || []) w(`- ${x.label}: ${x.name || "not set"}`);
-  if ((P.signoffs || []).length) w(`- Sign-offs: ${P.signoffs.map((s) => `${s.role} (${s.who || "unassigned"}, ${s.approved ? "approved" : "pending"})`).join("; ")}`);
-  w();
-  w("## When");
-  w(`- Code freeze: ${fmtWhen(P.when.freezeAt)}`);
-  w(`- Go/no-go meeting: ${fmtWhen(P.when.meetingAt)}`);
-  w(`- Deploy: ${fmtWhen(P.when.deployAt)} for ${P.when.windowHours} hours`);
-  w();
-  w("## Where");
-  w(`- Repository: ${P.where.repo}, ${P.where.headRef} compared with ${P.where.baseRef}`);
-  w(`- Environments: ${P.where.environments.join(", ") || "none selected"}`);
-  w(`- Services: ${P.where.services || "not set"}`);
-  w();
-  w("## How");
-  w(`- Rollout: ${risk.ladder.steps.join("% → ")}%, ${risk.ladder.bake} minute bake. ${risk.ladder.note}`);
-  w(`- Feature flags default off: ${P.how.flagsDefaultOff ? "yes" : "no"}`);
-  w(`- Rollback (${P.how.rollbackMinutes} minutes): ${P.how.rollbackPlan}`);
-  w(`- Communication: ${P.how.channel}. Dashboards: ${P.how.dashboards}`);
-  w(`- Verification: ${P.how.verification}`);
-  w();
-  w("## Scope and story points");
-  w(`${pts.done} of ${pts.total} points done (${pts.pctDone}%). ${pts.inFlight} in flight, ${pts.todo} not started. ${fc.detail}`);
-  w();
-  w("| Status | Points |");
-  w("|---|---|");
-  for (const s of STATUSES) w(`| ${s} | ${pts.byStatus[s]} |`);
-  w();
-  w("## Risk analysis");
-  w("| Factor | Points | Detail |");
-  w("|---|---|---|");
-  for (const f of [...risk.factors].sort((a, b) => b.points - a.points)) w(`| ${f.label} | ${f.points}/${f.max} | ${f.detail} |`);
-  w();
-  if (risk.recommendations.length) {
-    w("### What to do about it");
-    risk.recommendations.forEach((r, i) => w(`${i + 1}. **${r.label}.** ${r.advice}`));
-    w();
-  }
-  w("## Go/no-go criteria");
+/**
+ * The report as data: sections made of paragraphs, lists, tables and checklists.
+ * Markdown and HTML are both rendered from this, so they always say the same thing.
+ */
+function reportModel(plan, result, risk, now = Date.now()) {
+  const P = plan, { verdict, criteria } = result, pts = risk.points, fc = risk.forecast;
+  const name = P.release.name || "Untitled release";
+  const required = criteria.filter((c) => c.required);
+  const clear = required.filter((c) => c.effective === "pass" || c.effective === "waived").length;
+  const drivers = [...risk.factors].filter((f) => f.points > 0).sort((a, b) => b.points - a.points).slice(0, 3).map((f) => f.label.toLowerCase());
+  const holding = criteria.filter((c) => verdict.holding.includes(c.id));
   const order = { fail: 0, warn: 1, pending: 2, waived: 3, pass: 4 };
-  for (const c of [...criteria].sort((a, b) => order[a.effective] - order[b.effective])) {
-    w(`- [${c.effective === "pass" || c.effective === "waived" ? "x" : " "}] **${c.name}** (${c.effective}${c.required ? "" : ", advisory"}): ${c.detail}`);
-    if (c.waiver && c.effective === "waived") w(`  - Waived by ${c.waiver.approver}: ${c.waiver.reason}`);
+  const sections = [];
+  const sec = (title, ...blocks) => sections.push({ title, blocks });
+  const ul = (items) => ({ t: "ul", items });
+  const p = (text) => ({ t: "p", text });
+  const table = (head, rows) => ({ t: "table", head, rows });
+
+  sec("Summary",
+    p(`${name} is ${verdict.call}. ${verdict.reason} Risk is ${risk.score} out of 100 (${risk.level})${drivers.length ? `, driven mostly by ${joinList(drivers)}` : ""}. ` +
+      `${pts.total ? `${pts.done} of ${pts.total} story points are done (${pts.pctDone}%). ${fc.detail}` : "No story points have been entered."} ${clear} of ${required.length} required criteria are clear.`),
+    ...(holding.length ? [{ t: "h3", text: "What is holding the release" }, ul(holding.map((c) => `${c.name} (${c.effective}): ${c.detail}`))] : []));
+
+  sec("What", ul([
+    `Release: ${name}${P.release.version ? ` (${P.release.version})` : ""}, ${P.release.type}`,
+    `Jira fix version: ${P.release.fixVersion || "not set"}`,
+    `Changes: ${P.release.summary || "not set"}`,
+    `Customer impact: ${P.release.customerImpact || "not set"}`,
+  ]));
+
+  sec("Who", ul([
+    ...ROLE_KEYS.map(([k, label]) => `${label}: ${P.people[k] || "not set"}`),
+    ...(P.extraPeople || []).map((x) => `${x.label}: ${x.name || "not set"}`),
+    ...((P.signoffs || []).length ? [`Sign-offs: ${P.signoffs.map((s) => `${s.role} (${s.who || "unassigned"}, ${s.approved ? "approved" : "pending"})`).join("; ")}`] : []),
+  ]));
+
+  sec("When", ul([
+    `Code freeze: ${fmtWhen(P.when.freezeAt)}`,
+    `Go/no-go meeting: ${fmtWhen(P.when.meetingAt)}`,
+    `Deploy: ${fmtWhen(P.when.deployAt)} for ${P.when.windowHours} hours`,
+  ]));
+
+  sec("Where", ul([
+    `Repository: ${P.where.repo || "not set"}${P.where.headRef ? `, ${P.where.headRef} compared with ${P.where.baseRef || "not set"}` : ""}`,
+    `Environments: ${P.where.environments.join(", ") || "none selected"}`,
+    `Services: ${P.where.services || "not set"}`,
+  ]));
+
+  sec("How", ul([
+    `Rollout: ${risk.ladder.steps.join("% → ")}%, ${risk.ladder.bake} minute bake. ${risk.ladder.note}`,
+    `Feature flags default off: ${P.how.flagsDefaultOff ? "yes" : "no"}`,
+    `Rollback (${P.how.rollbackMinutes} minutes): ${P.how.rollbackPlan || "not written"}`,
+    `Communication: ${P.how.channel || "not set"}. Dashboards: ${P.how.dashboards || "not set"}`,
+    `Verification: ${P.how.verification || "not set"}`,
+  ]));
+
+  sec("Scope and story points",
+    p(pts.total ? `${pts.done} of ${pts.total} points done (${pts.pctDone}%). ${pts.inFlight} in flight, ${pts.todo} not started. ${fc.detail}` : "No story points have been entered."),
+    table(["Status", "Points"], STATUSES.map((st) => [st, String(pts.byStatus[st])])),
+    ...(Object.keys(pts.byArea).length ? [table(["Area", "Done", "Total"], Object.entries(pts.byArea).sort((a, b) => b[1].total - a[1].total).map(([a, v]) => [a, String(v.done), String(v.total)]))] : []));
+
+  sec("Risk analysis",
+    table(["Factor", "Points", "Detail"], [...risk.factors].sort((a, b) => b.points - a.points).map((f) => [f.label, `${f.points}/${f.max}`, f.detail])),
+    ...(risk.recommendations.length ? [{ t: "h3", text: "What to do about it" }, { t: "ol", items: risk.recommendations.map((r) => ({ bold: r.label, text: r.advice })) }] : []));
+
+  sec("Go/no-go criteria", {
+    t: "checks",
+    items: [...criteria].sort((a, b) => order[a.effective] - order[b.effective]).map((c) => ({
+      done: c.effective === "pass" || c.effective === "waived", name: c.name, status: c.effective, advisory: !c.required, detail: c.detail,
+      sub: c.waiver && c.effective === "waived" ? `Waived by ${c.waiver.approver}: ${c.waiver.reason}` : "",
+    })),
+  });
+
+  const waived = criteria.filter((c) => c.effective === "waived" && c.waiver);
+  if (waived.length) {
+    sec("Accepted risks", table(["Criterion", "Was", "Approved by", "Reason", "When"], waived.map((c) => [c.name, c.waiver.statusAtWaive || "", c.waiver.approver, c.waiver.reason, c.waiver.at ? new Date(c.waiver.at).toLocaleDateString("en-US", { month: "short", day: "numeric" }) : ""])));
   }
-  w();
-  w("## Runbook");
-  w("| When | Phase | Step | Owner | Status |");
-  w("|---|---|---|---|---|");
-  for (const r of P.runbook) w(`| ${fmtWhen(r.at)} | ${r.phase} | ${r.step} | ${r.owner || "unassigned"} | ${r.status} |`);
-  return lines.join("\n");
+
+  sec("Runbook", table(["When", "Phase", "Step", "Owner", "Status"], P.runbook.map((r) => [fmtWhen(r.at), r.phase, r.step, r.owner || "unassigned", r.status])));
+
+  return { title: `${name} release report`, name, call: verdict.call, reason: verdict.reason, riskScore: risk.score, riskLevel: risk.level, generated: fmtWhen(fmtLocal(now)), sections };
 }
 
-return { TYPES, PRIORITIES, TICKET_TYPES, STATUSES, AREAS, ENVIRONMENTS, STRATEGIES, CHECK_STATES, PHASES, ROLE_KEYS, TEMPLATES, fmtLocal, defaultPlan, applyTemplate, generateRunbook, runbookStatus, planToSnapshot, planState, planConfig, briefMarkdown };
+const cell = (v) => String(v ?? "").replace(/\|/g, "\\|").replace(/\s*\n\s*/g, " ");
+
+function reportMarkdown(m) {
+  const out = [`# ${m.title}`, "", `**Call: ${m.call}.** ${m.reason}  `, `**Risk: ${m.riskScore}/100 (${m.riskLevel}).** Generated ${m.generated}.`, ""];
+  for (const s of m.sections) {
+    out.push(`## ${s.title}`, "");
+    for (const b of s.blocks) {
+      if (b.t === "p") out.push(b.text, "");
+      else if (b.t === "h3") out.push(`### ${b.text}`, "");
+      else if (b.t === "ul") out.push(...b.items.map((x) => `- ${x}`), "");
+      else if (b.t === "ol") out.push(...b.items.map((x, i) => `${i + 1}. **${x.bold}.** ${x.text}`), "");
+      else if (b.t === "table") out.push(`| ${b.head.join(" | ")} |`, `|${b.head.map(() => "---").join("|")}|`, ...b.rows.map((r) => `| ${r.map(cell).join(" | ")} |`), "");
+      else if (b.t === "checks") {
+        for (const c of b.items) {
+          out.push(`- [${c.done ? "x" : " "}] **${c.name}** (${c.status}${c.advisory ? ", advisory" : ""}): ${c.detail}`);
+          if (c.sub) out.push(`  - ${c.sub}`);
+        }
+        out.push("");
+      }
+    }
+  }
+  return out.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
+}
+
+const h = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+/** HTML for the report body. Plain semantic tags so it pastes cleanly into Docs, Word, Confluence or Slack. */
+function reportHtml(m) {
+  const out = [`<h1>${h(m.title)}</h1>`, `<p class="call call-${m.call.toLowerCase().replace(/[^a-z]/g, "")}"><strong>Call: ${h(m.call)}.</strong> ${h(m.reason)}<br><strong>Risk: ${m.riskScore}/100 (${h(m.riskLevel)}).</strong> Generated ${h(m.generated)}.</p>`];
+  for (const s of m.sections) {
+    out.push(`<h2>${h(s.title)}</h2>`);
+    for (const b of s.blocks) {
+      if (b.t === "p") out.push(`<p>${h(b.text)}</p>`);
+      else if (b.t === "h3") out.push(`<h3>${h(b.text)}</h3>`);
+      else if (b.t === "ul") out.push(`<ul>${b.items.map((x) => `<li>${h(x)}</li>`).join("")}</ul>`);
+      else if (b.t === "ol") out.push(`<ol>${b.items.map((x) => `<li><strong>${h(x.bold)}.</strong> ${h(x.text)}</li>`).join("")}</ol>`);
+      else if (b.t === "table") out.push(`<table><thead><tr>${b.head.map((x) => `<th>${h(x)}</th>`).join("")}</tr></thead><tbody>${b.rows.map((r) => `<tr>${r.map((x) => `<td>${h(x)}</td>`).join("")}</tr>`).join("")}</tbody></table>`);
+      else if (b.t === "checks") out.push(`<ul class="checks">${b.items.map((c) => `<li>${c.done ? "☑" : "☐"} <strong>${h(c.name)}</strong> <em>(${h(c.status)}${c.advisory ? ", advisory" : ""})</em>: ${h(c.detail)}${c.sub ? `<br><small>${h(c.sub)}</small>` : ""}</li>`).join("")}</ul>`);
+    }
+  }
+  return out.join("\n");
+}
+
+/** A complete, printable HTML file: open it and use the browser's Print, then Save as PDF. */
+function reportDocument(m) {
+  const css = `body{font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:#15201c;max-width:860px;margin:32px auto;padding:0 20px}h1{font-size:26px;margin:0 0 8px}h2{font-size:17px;margin:28px 0 8px;padding-bottom:4px;border-bottom:1px solid #d8e0dc}h3{font-size:14px;margin:16px 0 6px}table{border-collapse:collapse;width:100%;margin:8px 0;font-size:13px}th,td{border:1px solid #d8e0dc;padding:6px 8px;text-align:left;vertical-align:top}th{background:#f1f4f3}ul,ol{padding-left:22px}ul.checks{list-style:none;padding-left:0}ul.checks li{margin:6px 0}.call{padding:10px 14px;border-radius:8px;border:1px solid #d8e0dc;background:#f6f8f7}.call-nogo{background:#fbe2df;border-color:#b3261e}.call-hold{background:#fbefd2;border-color:#8f5a00}.call-go{background:#e0f2e8;border-color:#1b7a49}small{color:#5a6a64}@media print{body{margin:0;max-width:none}h2{break-after:avoid}table,li{break-inside:avoid}}`;
+  return `<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n<meta name="viewport" content="width=device-width, initial-scale=1">\n<title>${h(m.title)}</title>\n<style>${css}</style>\n</head>\n<body>\n${reportHtml(m)}\n</body>\n</html>\n`;
+}
+
+/** The report as Markdown. Kept under its original name for existing callers. */
+const briefMarkdown = (plan, result, risk, now = Date.now()) => reportMarkdown(reportModel(plan, result, risk, now));
+
+return { TYPES, PRIORITIES, TICKET_TYPES, STATUSES, AREAS, ENVIRONMENTS, STRATEGIES, CHECK_STATES, defaultSettings, PHASES, ROLE_KEYS, TEMPLATES, fmtLocal, defaultPlan, applyTemplate, blankPlan, nextPlan, generateRunbook, runbookStatus, planToSnapshot, planState, planConfig, criteriaCatalog, reportModel, reportMarkdown, reportHtml, reportDocument, briefMarkdown };
 })();
 window.__STANDALONE = true;
 (() => {
@@ -1108,18 +1275,19 @@ window.__STANDALONE = true;
 // The same engine and risk model the server uses run here, in the browser.
 const { evaluate } = __mod_engine;
 const { computeRisk } = __mod_risk;
-const { defaultPlan, applyTemplate, generateRunbook, planToSnapshot, planState, planConfig, briefMarkdown, TYPES, PRIORITIES, TICKET_TYPES, STATUSES, AREAS, ENVIRONMENTS, STRATEGIES, CHECK_STATES, PHASES, ROLE_KEYS, TEMPLATES } = __mod_plan;
+const { defaultPlan, blankPlan, nextPlan, applyTemplate, generateRunbook, planToSnapshot, planState, planConfig, briefMarkdown, TYPES, PRIORITIES, TICKET_TYPES, STATUSES, AREAS, ENVIRONMENTS, STRATEGIES, CHECK_STATES, PHASES, ROLE_KEYS, TEMPLATES } = __mod_plan;
 const $ = (s, r = document) => r.querySelector(s);
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const KEY = "rr.plan.v1";
+const OLD_KEY = "rr.plan.v1"; // the single plan the first version of the planner saved
+const LIB_KEY = "rr.releases.v1";
 const STANDALONE = typeof window !== "undefined" && window.__STANDALONE === true;
 const RUN_STATUS = ["todo", "doing", "done", "blocked"];
 const LABEL = { pass: "Pass", warn: "At risk", fail: "Failing", pending: "Pending", waived: "Waived" };
 const chip = (s) => `<span class="chip s-${s}"><i></i>${LABEL[s]}</span>`;
 
 const store = {
-  get() { try { return localStorage.getItem(KEY); } catch { return null; } },
-  set(v) { try { localStorage.setItem(KEY, v); } catch { /* storage can be unavailable */ } },
+  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch { /* storage can be unavailable */ } },
 };
 
 /* ---------- plan state ---------- */
@@ -1138,18 +1306,37 @@ function fillDefaults(def, val) {
   for (const k of Object.keys(val || {})) if (!(k in out)) out[k] = val[k];
   return out;
 }
-function loadPlan() {
+/* ---------- the release library: every release you have entered, saved in this browser ---------- */
+
+const newId = () => "r" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+const validPlan = (p) => Boolean(p && Array.isArray(p.tickets) && p.release);
+
+function loadLib() {
   try {
-    const raw = store.get();
+    const raw = store.get(LIB_KEY);
     if (raw) {
-      const p = JSON.parse(raw);
-      if (p && Array.isArray(p.tickets) && p.release) return fillDefaults(defaultPlan(), p);
+      const l = JSON.parse(raw);
+      const order = (l.order || []).filter((id) => validPlan(l.items?.[id]));
+      if (order.length) {
+        const items = {};
+        for (const id of order) items[id] = { ...fillDefaults(defaultPlan(), l.items[id]), id };
+        return { current: items[l.current] ? l.current : order[0], order, items };
+      }
+    }
+    const old = store.get(OLD_KEY); // keep whatever the first version saved
+    if (old) {
+      const p = JSON.parse(old);
+      if (validPlan(p)) { const id = newId(); return { current: id, order: [id], items: { [id]: { ...fillDefaults(defaultPlan(), p), id } } }; }
     }
   } catch { /* fall through to the example */ }
-  return defaultPlan();
+  const id = newId();
+  return { current: id, order: [id], items: { [id]: { ...defaultPlan(), id } } };
 }
 
-let P = loadPlan();
+let lib = loadLib();
+let P = lib.items[lib.current];
+function saveLib() { lib.items[lib.current] = P; store.set(LIB_KEY, JSON.stringify(lib)); }
+
 let openWaive = null;
 let waiveError = "";
 let integrations = { jira: false, server: false };
@@ -1163,14 +1350,14 @@ const CHECK_OPTS = CHECK_STATES;
 
 const SECTIONS = [
   { id: "what", title: "What is shipping", hint: "Name, type and what customers will notice.", fields: [
-    { p: "release.name", l: "Release name" },
-    { p: "release.version", l: "Version", mono: true },
+    { p: "release.name", l: "Release name", ph: "e.g. Release 4.13" },
+    { p: "release.version", l: "Version", mono: true, ph: "4.13.0" },
     { p: "release.type", l: "Release type", t: "select", o: opt(TYPES), after: "tpl" },
-    { p: "release.fixVersion", l: "Jira fix version", mono: true },
+    { p: "release.fixVersion", l: "Jira fix version", mono: true, ph: "4.13" },
     { p: "release.summary", l: "What changes", t: "textarea", wide: true },
     { p: "release.customerImpact", l: "Customer impact", t: "textarea", wide: true },
   ] },
-  { id: "who", title: "Who is involved", hint: "Named owners flow into the runbook and the brief.", fields: ROLE_KEYS.map(([k, l]) => ({ p: `people.${k}`, l })) },
+  { id: "who", title: "Who is involved", hint: "Named owners flow into the runbook and the brief.", fields: ROLE_KEYS.map(([k, l]) => ({ p: `people.${k}`, l, ph: "Name" })) },
   { id: "when", title: "When", hint: "Dates drive the runbook times and the deploy timing risk.", fields: [
     { p: "when.freezeAt", l: "Code freeze", t: "datetime" },
     { p: "when.meetingAt", l: "Go/no-go meeting", t: "datetime" },
@@ -1178,16 +1365,16 @@ const SECTIONS = [
     { p: "when.windowHours", l: "Deploy window", t: "number", suffix: "hours" },
   ] },
   { id: "where", title: "Where", hint: "Repository, branches, environments and services in scope.", fields: [
-    { p: "where.repo", l: "Repository", mono: true },
-    { p: "where.baseRef", l: "Compare from (tag)", mono: true },
-    { p: "where.headRef", l: "Release branch", mono: true },
+    { p: "where.repo", l: "Repository", mono: true, ph: "owner/name" },
+    { p: "where.baseRef", l: "Compare from (tag)", mono: true, ph: "v4.12.0" },
+    { p: "where.headRef", l: "Release branch", mono: true, ph: "release/4.13" },
     { p: "where.environments", l: "Environments", t: "multi", o: opt(ENVIRONMENTS), wide: true },
-    { p: "where.services", l: "Services affected", wide: true },
+    { p: "where.services", l: "Services affected", wide: true, ph: "e.g. orders-api, billing, web-app" },
   ] },
   { id: "how", title: "How it ships and how it comes back", hint: "Rollout, flags and the rollback plan.", fields: [
     { p: "how.strategy", l: "Rollout strategy", t: "select", o: STRATEGIES },
     { p: "how.rollbackMinutes", l: "Rollback target", t: "number", suffix: "minutes" },
-    { p: "how.channel", l: "Release channel", mono: true },
+    { p: "how.channel", l: "Release channel", mono: true, ph: "#release-413" },
     { p: "how.flagsDefaultOff", l: "New features behind flags, default off", t: "check" },
     { p: "how.rollbackPlan", l: "Rollback plan", t: "textarea", wide: true },
     { p: "how.dashboards", l: "Dashboards to watch", wide: true },
@@ -1259,7 +1446,7 @@ function fieldHtml(f) {
   else if (f.t === "textarea") control = `<textarea id="${id}" data-p="${f.p}" rows="3">${esc(v)}</textarea>`;
   else if (f.t === "number") control = `<input id="${id}" type="number" step="any" data-p="${f.p}" value="${esc(v)}">`;
   else if (f.t === "datetime") control = `<input id="${id}" type="datetime-local" data-p="${f.p}" value="${esc(v)}">`;
-  else control = `<input id="${id}" class="${mono.trim()}" type="text" data-p="${f.p}" value="${esc(v)}" autocomplete="off">`;
+  else control = `<input id="${id}" class="${mono.trim()}" type="text" data-p="${f.p}" value="${esc(v)}" placeholder="${esc(f.ph || "")}" autocomplete="off">`;
   const after = f.after === "tpl"
     ? `<div class="row-actions"><button class="btn small" type="button" data-act="apply-template">Apply defaults for this type</button><span class="tpl-note">Sets rollout, window, rollback time, sign-off roles and the runbook.</span></div>`
     : f.suffix ? `<span class="suffix">${esc(f.suffix)}</span>` : "";
@@ -1382,6 +1569,68 @@ function sayUndo(id, text, what) {
   if (el) { el.className = "msg"; el.innerHTML = `${esc(text)} <button class="btn small" type="button" data-act="undo-clear" data-what="${what}">Undo</button>`; }
 }
 
+
+/* ---------- library actions ---------- */
+
+function relLabel(p, now) {
+  let tail = "";
+  try {
+    const r = evaluate(planToSnapshot(p, now), planConfig(p), planState(p));
+    tail = ` · ${r.verdict.call} · risk ${computeRisk(p, now).score}`;
+  } catch { /* a broken plan still gets a name */ }
+  return (p.release.name || "Untitled release") + tail;
+}
+
+function renderRelSelect() {
+  const now = Date.now(), sel = $("#rel-select");
+  if (!sel) return;
+  sel.innerHTML = lib.order.map((id) => `<option value="${esc(id)}"${id === lib.current ? " selected" : ""}>${esc(relLabel(id === lib.current ? P : lib.items[id], now))}</option>`).join("");
+}
+
+function showRelease() {
+  openWaive = null; waiveError = "";
+  saveLib();
+  renderInputs();
+  renderResults();
+}
+
+function openRelease(id) {
+  if (!lib.items[id]) return;
+  lib.items[lib.current] = P;
+  lib.current = id;
+  P = lib.items[id];
+  showRelease();
+}
+
+function addRelease(plan) {
+  plan.id = newId();
+  lib.items[lib.current] = P;
+  lib.items[plan.id] = plan;
+  lib.order.push(plan.id);
+  lib.current = plan.id;
+  P = plan;
+  showRelease();
+}
+
+let lastDeleted = null;
+function deleteRelease() {
+  const id = lib.current, idx = lib.order.indexOf(id), name = P.release.name || "Untitled release";
+  lastDeleted = { plan: P, idx };
+  lib.order.splice(idx, 1);
+  delete lib.items[id];
+  if (!lib.order.length) { const b = { ...blankPlan(Date.now(), P.release.type), id: newId() }; lib.items[b.id] = b; lib.order.push(b.id); }
+  lib.current = lib.order[Math.min(idx, lib.order.length - 1)];
+  P = lib.items[lib.current];
+  showRelease();
+  sayRel(`Deleted “${name}”.`, true);
+}
+
+function sayRel(text, undo = false, kind = "") {
+  const el = $("#rel-msg");
+  el.className = "msg " + kind;
+  el.innerHTML = esc(text) + (undo ? ` <button class="btn small" type="button" data-act="rel-undo">Undo</button>` : "");
+}
+
 /* ---------- results ---------- */
 
 function compute() {
@@ -1407,7 +1656,7 @@ function renderSumbar({ result, risk, now }) {
     kv(`${risk.points.pctDone}%`, `Points done · ${risk.points.done}/${risk.points.total}`) +
     kv(days, "To deploy") +
     kv(`${v.counts.fail + v.counts.warn + v.counts.pending}`, "Criteria open") +
-    `<span class="spacer"></span><div class="toolbar">${STANDALONE ? `<button class="btn small" type="button" data-act="copy-json">Copy plan JSON</button>` : `<button class="btn small" type="button" data-act="export">Export plan</button>`}<button class="btn small" type="button" data-act="import">Import plan</button><button class="btn small" type="button" data-act="reset">Reset to example</button></div>`;
+    `<span class="spacer"></span><div class="toolbar">${STANDALONE ? `<button class="btn small" type="button" data-act="copy-json">Copy plan JSON</button>` : `<button class="btn small" type="button" data-act="export">Export plan</button>`}</div>`;
 }
 
 function renderVerdict({ result }) {
@@ -1483,7 +1732,10 @@ function renderResults() {
     return;
   }
   renderSumbar(last);
-  $("#results").innerHTML = renderVerdict(last) + renderRisk(last) + renderPoints(last) + renderCriteria(last) + renderBrief(last);
+  const fresh = !P.release.name.trim() && P.tickets.length === 0 && !Number(P.signals.ci.total);
+  const note = fresh ? `<div class="banner"><strong>New release.</strong><span>Name it and set the dates on the left, then add tickets or pull them from Jira. The call stays HOLD until the checks have data, and anything unknown counts as risk.</span></div>` : "";
+  renderRelSelect();
+  $("#results").innerHTML = note + renderVerdict(last) + renderRisk(last) + renderPoints(last) + renderCriteria(last) + renderBrief(last);
   const p = last.risk.points;
   const sum = $("#tk-sum");
   if (sum) sum.textContent = `${p.tickets} tickets · ${p.total} points · ${p.done} done`;
@@ -1494,7 +1746,7 @@ function renderResults() {
 let raf = 0, saveTimer = 0;
 function changed() {
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => store.set(JSON.stringify(P)), 250);
+  saveTimer = setTimeout(saveLib, 250);
   renderClear();
   cancelAnimationFrame(raf);
   raf = requestAnimationFrame(renderResults);
@@ -1612,7 +1864,35 @@ document.addEventListener("click", async (e) => {
   }
   else if (act === "export") download(`${slug()}-plan.json`, JSON.stringify(P, null, 2), "application/json");
   else if (act === "import") $("#import-file").click();
-  else if (act === "reset") { P = defaultPlan(); store.set(JSON.stringify(P)); openWaive = null; renderInputs(); renderResults(); }
+  else if (act === "rel-new") {
+    addRelease(blankPlan(Date.now(), P.release.type));
+    sayRel("New release. Name it and set the dates, then add tickets or pull them from Jira.", false, "ok");
+    $("#f-release-name")?.focus();
+  }
+  else if (act === "rel-next") {
+    const from = P.release.name || "Untitled release";
+    addRelease(nextPlan(P, Date.now()));
+    sayRel(`Started the next release from “${from}”. People, environments and rollout settings carried over. Tickets, signals, checks and approvals are cleared.`, false, "ok");
+    $("#f-release-name")?.focus();
+  }
+  else if (act === "rel-dup") {
+    const c = JSON.parse(JSON.stringify(P));
+    c.release.name = `Copy of ${P.release.name || "Untitled release"}`;
+    addRelease(c);
+    sayRel("Duplicated. Changes here do not affect the original.", false, "ok");
+  }
+  else if (act === "rel-example") { addRelease(defaultPlan()); sayRel("Loaded the example release as a new entry.", false, "ok"); }
+  else if (act === "rel-delete") deleteRelease();
+  else if (act === "rel-undo") {
+    if (lastDeleted) {
+      const { plan, idx } = lastDeleted; lastDeleted = null;
+      lib.items[lib.current] = P;
+      lib.items[plan.id] = plan;
+      lib.order.splice(Math.min(idx, lib.order.length), 0, plan.id);
+      openRelease(plan.id);
+      sayRel(`Restored “${plan.release.name || "Untitled release"}”.`, false, "ok");
+    }
+  }
 });
 
 document.addEventListener("submit", (e) => {
@@ -1647,6 +1927,8 @@ document.addEventListener("submit", (e) => {
   changed();
 });
 
+$("#rel-select").addEventListener("change", (e) => openRelease(e.target.value));
+
 $("#import-file").addEventListener("change", async (e) => {
   const file = e.target.files[0];
   e.target.value = "";
@@ -1654,9 +1936,8 @@ $("#import-file").addEventListener("change", async (e) => {
   try {
     const p = JSON.parse(await file.text());
     if (!p || !Array.isArray(p.tickets) || !p.release) throw new Error("That file is not a release plan.");
-    P = fillDefaults(defaultPlan(), p);
-    store.set(JSON.stringify(P));
-    renderInputs(); renderResults();
+    addRelease(fillDefaults(defaultPlan(), p));
+    sayRel(`Imported “${P.release.name || "Untitled release"}” as a new release.`, false, "ok");
   } catch (err) {
     $("#results").insertAdjacentHTML("afterbegin", `<div class="banner bad" role="alert"><strong>Could not import.</strong><span>${esc(err.message)}</span></div>`);
   }
@@ -1667,6 +1948,7 @@ $("#import-file").addEventListener("change", async (e) => {
 (async function init() {
   renderInputs();
   renderResults();
+  saveLib();
   if (STANDALONE) return; // no server behind a single-file copy
   try {
     const res = await fetch("/api/config");

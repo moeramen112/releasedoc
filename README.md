@@ -22,6 +22,25 @@ Before a release, someone collects status by hand from the issue tracker, CI, th
 
 ![Planner](docs/planner.png)
 
+## Using it for every release
+
+The planner keeps a library of releases, so each new release starts clean and the old ones stay available.
+
+| Button | What it does |
+|---|---|
+| **New release** | An empty release with sensible defaults: a Tuesday 2 AM deploy at least a week out, freeze and go/no-go dates before it, the sign-offs for the release type, and a runbook. Everything unknown shows as pending, so a new release can never read GO by accident. |
+| **Start next release** | The usual way to begin the next release in a series. Keeps the people, repository, environments, rollout and rollback settings, budgets and which sign-offs are needed. Clears the name, dates, tickets, quality signals, checks, approvals and waivers. |
+| **Duplicate** | An exact copy, for trying a what-if. |
+| **Delete** | Removes the release, with an Undo. |
+| **Load example** | Adds the invented example release, for demos. |
+| **Import** | Adds a release from a plan file saved with Export plan. |
+
+Pick a release from the list at the top to switch. Each release shows its current call and risk score in the list.
+
+Releases are saved in the browser you use, not on a server. Clearing site data removes them, and they do not follow you to another computer. Use **Export plan** to back one up or move it, and **Import** to bring it back. Saving them on the server is the natural next step for a team.
+
+Per-release criteria are already supported by the engine: a release can switch a criterion off, make it advisory, or add its own checks that a person confirms. There is no screen for it yet, so today that is set in the plan file.
+
 ## Run it
 
 Needs Node 20 or newer. No dependencies to install.
@@ -29,7 +48,7 @@ Needs Node 20 or newer. No dependencies to install.
 ```bash
 npm run demo     # invented data, opens at http://localhost:3000
 npm start        # live data, see "Connect your tools"
-npm test         # 56 tests
+npm test         # 62 tests
 ```
 
 `dist/release-planner.standalone.html` is the planner as a single file with no server. Open it in a browser. It has no GitHub or Jira connection and no downloads, but everything else works, and it saves your plan in the browser.
@@ -92,7 +111,7 @@ src/plan.js        the plan, templates, runbook generator, brief (pure)
 src/sources/       GitHub, Jira, and demo-data adapters
 src/server.js      HTTP server and JSON API
 public/            dashboard and planner (plain JS, no build step)
-test/              56 tests, including a mock GitHub and a mock Jira
+test/              62 tests, including a mock GitHub and a mock Jira
 scripts/           build-standalone.mjs makes the single-file planner
 ```
 
