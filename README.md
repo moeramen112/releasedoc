@@ -41,6 +41,25 @@ Releases are saved in the browser you use, not on a server. Clearing site data r
 
 Per-release criteria are already supported by the engine: a release can switch a criterion off, make it advisory, or add its own checks that a person confirms. There is no screen for it yet, so today that is set in the plan file.
 
+## On another computer
+
+1. Install [Node.js](https://nodejs.org) 20 or newer (the LTS download) and [Git](https://git-scm.com). Check with `node -v`.
+2. Get the code and start it. The same commands work on Windows, Mac and Linux:
+
+```bash
+git clone https://github.com/moeramen112/releasedoc.git
+cd releasedoc
+npm run demo
+```
+
+3. Open http://localhost:3000. The Planner is at http://localhost:3000/plan.html.
+
+If the repository is private, Git asks you to sign in the first time. Use `gh auth login`, or a personal access token as the password.
+
+Without Node or Git: download `dist/release-planner.standalone.html` from the repository and open it in any browser. It is the planner as one file.
+
+What does not come with you: releases you entered are saved in the browser on the first computer, and tokens live in that computer's environment, never in the repository. To move a release, use **Export plan** on the first computer and **Import** on the second.
+
 ## Run it
 
 Needs Node 20 or newer. No dependencies to install.

@@ -19,11 +19,14 @@ const CACHE_MS = 60_000;
 const REPO_RE = /^[\w.-]+\/[\w.-]+$/;
 const REF_RE = /^[\w./@+-]{1,200}$/;
 
+/** Demo mode: DEMO=1 in the environment, or the --demo flag, which also works on Windows. */
+const isDemo = () => process.env.DEMO === "1" || process.argv.includes("--demo");
+
 class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
 
-export async function createApp({ configPath = path.join(ROOT, "readiness.config.json"), stateDir = process.env.STATE_DIR || path.join(ROOT, "data"), defaultMode = process.env.DEMO === "1" ? "demo" : "live", env = process.env, deps = {} } = {}) {
+export async function createApp({ configPath = path.join(ROOT, "readiness.config.json"), stateDir = process.env.STATE_DIR || path.join(ROOT, "data"), defaultMode = isDemo() ? "demo" : "live", env = process.env, deps = {} } = {}) {
   const config = JSON.parse(await fs.readFile(configPath, "utf8"));
   const stores = {};
   // Waivers, manual checks and the audit log belong to one release, so each repo and release branch gets its own file.
@@ -228,8 +231,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const host = process.env.HOST || "127.0.0.1";
   const { server } = await createApp();
   server.listen(port, host, () => {
-    const mode = process.env.DEMO === "1" ? "demo data" : "live data";
+    const mode = isDemo() ? "demo data" : "live data";
     console.log(`Release readiness running on http://${host}:${port} (${mode})`);
-    if (process.env.DEMO !== "1" && !process.env.GITHUB_TOKEN) console.log("No GITHUB_TOKEN set: public repositories only, with GitHub's low anonymous rate limit.");
+    if (!isDemo() && !process.env.GITHUB_TOKEN) console.log("No GITHUB_TOKEN set: public repositories only, with GitHub's low anonymous rate limit.");
   });
 }

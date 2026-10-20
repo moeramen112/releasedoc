@@ -7,7 +7,7 @@
   "engines": { "node": ">=20" },
   "scripts": {
     "start": "node src/server.js",
-    "demo": "DEMO=1 node src/server.js",
+    "demo": "node src/server.js --demo",
     "test": "node --test"
   }
 }
