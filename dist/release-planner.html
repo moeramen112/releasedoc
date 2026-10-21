@@ -1467,7 +1467,7 @@ function renderInputs() {
       { p: "scope.bigAt", l: "Large ticket at", t: "number", suffix: "points or more" },
     ].map(fieldHtml).join("")}</div>
      <div class="tablewrap"><table class="tbl" style="min-width:1020px"><thead><tr><th>Key</th><th>Summary</th><th>Type</th><th>Pri</th><th>Pts</th><th>Status</th><th>Assignee</th><th>Area</th><th title="Includes a database migration">Mig</th><th title="Customers will see this">Cust</th><th title="Lacks automated tests">No tests</th><th></th></tr></thead><tbody id="tickets-body"></tbody></table></div>
-     <div class="row-actions"><button class="btn small" type="button" data-act="add-ticket">Add ticket</button><button class="btn small" type="button" data-act="pull-jira" id="b-jira">Pull from Jira</button><span id="tk-clear"></span><span class="msg" id="tk-sum"></span><span class="msg" id="jira-msg"></span></div>`);
+     <div class="row-actions"><button class="btn small" type="button" data-act="add-ticket">Add ticket</button><button class="btn small" type="button" data-act="pull-jira" id="b-jira">Pull from Jira</button><button class="btn small" type="button" data-act="refresh-jira" id="b-jira-refresh" title="Update statuses and points of the tickets below, and add new ones. Keeps tickets you typed by hand.">Refresh from Jira</button><span id="tk-clear"></span><span class="msg" id="tk-sum"></span><span class="msg" id="jira-msg"></span></div>`);
 
   html += section("signals", "Quality signals", "What the engine checks against budgets. With GitHub and CI connected these fill in on their own.",
     SIGNAL_GROUPS.map((g) => `<div class="sec-head"><h2>${esc(g.title)}</h2></div><div class="fields">${g.fields.map(fieldHtml).join("")}</div>`).join(""));
@@ -1785,10 +1785,39 @@ function say(id, text, kind = "") {
 }
 
 function updateJiraButton() {
-  const b = $("#b-jira");
-  if (!b) return;
-  b.disabled = !integrations.jira;
-  b.title = integrations.jira ? "" : integrations.server ? "Set JIRA_BASE_URL, JIRA_EMAIL and JIRA_API_TOKEN on the server" : "Available when running the server (npm start)";
+  const why = integrations.jira ? "" : integrations.server ? "Set JIRA_BASE_URL, JIRA_EMAIL and JIRA_API_TOKEN on the server" : "Available when running the server (npm start)";
+  for (const id of ["#b-jira", "#b-jira-refresh"]) {
+    const b = $(id);
+    if (!b) continue;
+    b.disabled = !integrations.jira;
+    if (why) b.title = why;
+  }
+}
+
+async function refreshJira() {
+  const version = P.release.fixVersion.trim();
+  if (!version) { say("jira-msg", "Enter the Jira fix version first.", "bad"); return; }
+  say("jira-msg", "Refreshing from Jira…");
+  try {
+    const res = await fetch("/api/jira/issues?version=" + encodeURIComponent(version));
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || `Request failed (${res.status}).`);
+    const byKey = new Map(body.issues.map((i) => [i.key, i]));
+    let updated = 0;
+    P.tickets = P.tickets.map((t) => {
+      const r = byKey.get(t.key);
+      if (!r) return t;
+      byKey.delete(t.key);
+      updated++;
+      return { ...t, ...r, tags: { ...(r.tags || {}), ...(t.tags || {}) } };
+    });
+    const added = [...byKey.values()];
+    P.tickets.push(...added);
+    renderTickets(); changed();
+    say("jira-msg", `Refreshed ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}: ${updated} updated, ${added.length} new, ${P.tickets.length - updated - added.length} not in Jira kept as they were.`, "ok");
+  } catch (e) {
+    say("jira-msg", e.message, "bad");
+  }
 }
 
 async function pullJira() {
@@ -1850,6 +1879,7 @@ document.addEventListener("click", async (e) => {
     }
   }
   else if (act === "pull-jira") pullJira();
+  else if (act === "refresh-jira") refreshJira();
   else if (act === "waive") { openWaive = a.dataset.id; waiveError = ""; renderResults(); }
   else if (act === "close-waive") { openWaive = null; waiveError = ""; renderResults(); }
   else if (act === "unwaive") { delete P.waivers[a.dataset.id]; changed(); }
