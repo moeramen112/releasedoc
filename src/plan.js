@@ -2,6 +2,7 @@
 // readiness engine (planToSnapshot + planConfig). Pure functions. Runs in Node and in the browser.
 
 import { num, parseLocal, summarizePoints, DONE } from "./risk.js";
+import { analyzeDependencies } from "./deps.js";
 
 export const TYPES = ["Major release", "Minor release", "Patch", "Hotfix"];
 export const PRIORITIES = ["P0", "P1", "P2", "P3"];
@@ -59,7 +60,7 @@ const nextWeekday = (now, minDays, dow, hour) => {
 };
 
 const t = (key, summary, type, priority, points, status, assignee, area, tags = {}) => ({
-  key, summary, type, priority, points, status, assignee, area,
+  key, summary, type, priority, points, status, assignee, area, team: "", blockedBy: "",
   tags: { migration: false, customerFacing: false, untested: false, ...tags },
 });
 
@@ -67,7 +68,7 @@ const t = (key, summary, type, priority, points, status, assignee, area, tags = 
 export function defaultPlan(now = Date.now()) {
   const plan = {
     release: {
-      name: "Release 4.12", version: "4.12.0", type: "Minor release", fixVersion: "4.12",
+      name: "Release 4.12", version: "4.12.0", type: "Minor release", fixVersion: "4.12", autoSync: false, slackAlerts: true,
       summary: "Multi-currency invoices, push token refresh for Android, and a faster orders page. Includes migration 0412 on the orders table.",
       customerImpact: "Billing customers see invoices in their own currency. Android users on OS 14+ keep push notifications after token refresh.",
     },
@@ -112,6 +113,7 @@ export function defaultPlan(now = Date.now()) {
       securityCritical: 0, securityHigh: 1,
     },
     checks: { migration: "fail", rollback: "pass", notes: "unset", errorbudget: "pass" },
+    handoffs: [], // { what, from, to, owner, due, status, blocks } work handed from one team to another
     signoffs: [
       { role: "QA", who: "Jo M.", approved: true },
       { role: "Product", who: "Rin A.", approved: true },
@@ -123,8 +125,46 @@ export function defaultPlan(now = Date.now()) {
     settings: defaultSettings(),
     customChecks: [],
   };
+  // Example dependencies, so the page shows how they read.
+  const set = (key, patch) => Object.assign(plan.tickets.find((x) => x.key === key), patch);
+  set("REL-2841", { team: "Backend" });
+  set("REL-2790", { team: "Backend" });
+  set("REL-2750", { team: "Frontend", blockedBy: "REL-2841" });
+  set("REL-2744", { team: "Frontend", blockedBy: "REL-2790" });
+  set("REL-2877", { team: "Mobile" });
+  set("REL-2903", { team: "Frontend" });
+  plan.handoffs = [
+    { what: "Final invoice designs", from: "Design", to: "Frontend", owner: "Rin Aoki", due: dayAt(now, -6, 17), status: "Done", blocks: "REL-2750" },
+    { what: "Android 14 test devices for QA", from: "DevOps", to: "QA", owner: "Hiro Nakamura", due: dayAt(now, -1, 12), status: "In progress", blocks: "REL-2877" },
+  ];
   plan.runbook = generateRunbook(plan);
   return plan;
+}
+
+/**
+ * Bring a fresh list of tickets from Jira into the ones already in the plan, matched by key.
+ * Status, points, priority and the rest come from Jira; the team a person chose, tags they ticked and
+ * blockers they typed are kept when Jira has nothing to say. Tickets that are only in the plan stay.
+ */
+export function mergeTickets(current = [], remote = []) {
+  const stable = (v) => JSON.stringify(v, (_, x) => (x && typeof x === "object" && !Array.isArray(x) ? Object.fromEntries(Object.keys(x).sort().map((k) => [k, x[k]])) : x));
+  const norm = (t) => ({ team: "", blockedBy: "", ...t, tags: { ...(t.tags || {}) } });
+  const up = (k) => String(k).toUpperCase();
+  const incoming = new Map((remote || []).map((r) => [up(r.key), r]));
+  const seen = new Set();
+  let updated = 0, kept = 0;
+  const tickets = (current || []).map((t) => {
+    const r = incoming.get(up(t.key));
+    if (!r) { kept++; return t; }
+    seen.add(up(t.key));
+    const before = norm(t);
+    const merged = { ...before, ...r, team: before.team || r.team || "", blockedBy: r.blockedBy || before.blockedBy || "", tags: { ...(r.tags || {}), ...before.tags } };
+    if (stable(merged) === stable(before)) return t; // nothing changed, so keep the original object
+    updated++;
+    return merged;
+  });
+  const added = (remote || []).filter((r) => !seen.has(up(r.key))).map(norm);
+  return { tickets: [...tickets, ...added], updated, added: added.length, kept };
 }
 
 /** Fill in the fields a release type normally has. Keeps people, dates and tickets. */
@@ -147,7 +187,7 @@ export function applyTemplate(plan, type) {
 export function blankPlan(now = Date.now(), type = "Minor release") {
   const deployAt = nextWeekday(now, 8, 2, 2);
   const plan = {
-    release: { name: "", version: "", type, fixVersion: "", summary: "", customerImpact: "" },
+    release: { name: "", version: "", type, fixVersion: "", autoSync: false, slackAlerts: true, summary: "", customerImpact: "" },
     people: Object.fromEntries(ROLE_KEYS.map(([k]) => [k, ""])),
     extraPeople: [],
     when: { freezeAt: shift(deployAt, -5 * 1440), meetingAt: shift(deployAt, -12 * 60), deployAt, windowHours: 2 },
@@ -162,6 +202,7 @@ export function blankPlan(now = Date.now(), type = "Minor release") {
       coverageDeltaPp: 0, coverageFloorPp: -1, p95DeltaPct: 0, p95BudgetPct: 5, securityCritical: 0, securityHigh: 0,
     },
     checks: { migration: "unset", rollback: "unset", notes: "unset", errorbudget: "unset" },
+    handoffs: [],
     signoffs: [], runbook: [], waivers: {},
     settings: defaultSettings(),
     customChecks: [], // { id, name, required, state } checks a person defines and confirms
@@ -289,6 +330,7 @@ export function planToSnapshot(plan, now = Date.now()) {
       security: { critical: num(s.securityCritical), high: num(s.securityHigh) },
       p95DeltaPct: num(s.p95DeltaPct), coverageDeltaPp: num(s.coverageDeltaPp),
       runbook: runbookStatus(plan, now),
+      deps: analyzeDependencies(plan.tickets, plan.handoffs, now, freezeMs),
     },
   };
 }
@@ -318,6 +360,7 @@ export function planConfig(plan) {
       { id: "p1", name: "No open P1 defects", type: "blockers_none", params: { severity: "P1", failAs: "warn" } },
       { id: "points", name: "Story points complete", type: "points_complete", params: { minDonePct: 100, failBelowPct: 70 } },
       { id: "big", name: "No large ticket left open", type: "large_open", required: false },
+      { id: "deps", name: "Dependencies clear", type: "dependencies_clear", required: false, params: { waitingAs: "warn" } },
       { id: "ci", name: "Release branch checks green", type: "ci_green" },
       { id: "migration", name: "Migration dry run on production-size data", type: "manual", source: "manual", params: { checkId: "migration" } },
       { id: "prs", name: "All scoped PRs merged", type: "open_prs", params: { failAs: "warn" } },
@@ -409,6 +452,19 @@ export function reportModel(plan, result, risk, now = Date.now()) {
     table(["Status", "Points"], STATUSES.map((st) => [st, String(pts.byStatus[st])])),
     ...(Object.keys(pts.byArea).length ? [table(["Area", "Done", "Total"], Object.entries(pts.byArea).sort((a, b) => b[1].total - a[1].total).map(([a, v]) => [a, String(v.done), String(v.total)]))] : []));
 
+  const dep = analyzeDependencies(P.tickets, P.handoffs, now, parseLocal(P.when.freezeAt));
+  if (dep.any) {
+    const on = (w) => w.on.map((x) => x.kind === "handoff" ? `${x.what} (${x.team || "handoff"}, ${x.status})` : `${x.key} (${x.status})`).join(", ");
+    sec("Dependencies",
+      p(dep.cycles.length ? `Circular dependency: ${dep.cycles.map((c) => c.join(" → ") + " → " + c[0]).join("; ")}. None of those tickets can start.`
+        : dep.waiting.length ? `${dep.waiting.length} open ${dep.waiting.length === 1 ? "ticket is" : "tickets are"} waiting on other work.` : "Every dependency is done."),
+      ...(dep.finishFirst.length ? [{ t: "h3", text: "Finish these first" }, ul(dep.finishFirst.map((x) => `${x.key}${x.team ? ` (${x.team})` : ""} ${x.summary}: holds up ${x.unblocks} ${x.unblocks === 1 ? "ticket" : "tickets"}`))] : []),
+      ...(dep.waiting.length ? [{ t: "h3", text: "Waiting" }, table(["Ticket", "Team", "Status", "Waiting on"], dep.waiting.map((w) => [`${w.key} ${w.summary}`, w.team || "", w.status, on(w)]))] : []),
+      ...(dep.startedEarly.length ? [{ t: "h3", text: "Started before the input was done" }, ul(dep.startedEarly.map((w) => `${w.key} (${w.status}) is waiting on ${on(w)}`))] : []),
+      ...(dep.ready.length ? [{ t: "h3", text: "Ready to start now" }, ul(dep.ready.map((x) => `${x.key} ${x.summary}`))] : []),
+      ...((P.handoffs || []).length ? [{ t: "h3", text: "Handoffs between teams" }, table(["Handoff", "From", "To", "Owner", "Due", "Status", "Blocks"], P.handoffs.map((h2) => [h2.what, h2.from, h2.to, h2.owner || "", h2.due ? fmtWhen(h2.due) : "", h2.status, h2.blocks || ""]))] : []));
+  }
+
   sec("Risk analysis",
     table(["Factor", "Points", "Detail"], [...risk.factors].sort((a, b) => b.points - a.points).map((f) => [f.label, `${f.points}/${f.max}`, f.detail])),
     ...(risk.recommendations.length ? [{ t: "h3", text: "What to do about it" }, { t: "ol", items: risk.recommendations.map((r) => ({ bold: r.label, text: r.advice })) }] : []));
@@ -478,6 +534,18 @@ export function reportHtml(m) {
 export function reportDocument(m) {
   const css = `body{font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:#15201c;max-width:860px;margin:32px auto;padding:0 20px}h1{font-size:26px;margin:0 0 8px}h2{font-size:17px;margin:28px 0 8px;padding-bottom:4px;border-bottom:1px solid #d8e0dc}h3{font-size:14px;margin:16px 0 6px}table{border-collapse:collapse;width:100%;margin:8px 0;font-size:13px}th,td{border:1px solid #d8e0dc;padding:6px 8px;text-align:left;vertical-align:top}th{background:#f1f4f3}ul,ol{padding-left:22px}ul.checks{list-style:none;padding-left:0}ul.checks li{margin:6px 0}.call{padding:10px 14px;border-radius:8px;border:1px solid #d8e0dc;background:#f6f8f7}.call-nogo{background:#fbe2df;border-color:#b3261e}.call-hold{background:#fbefd2;border-color:#8f5a00}.call-go{background:#e0f2e8;border-color:#1b7a49}small{color:#5a6a64}@media print{body{margin:0;max-width:none}h2{break-after:avoid}table,li{break-inside:avoid}}`;
   return `<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n<meta name="viewport" content="width=device-width, initial-scale=1">\n<title>${h(m.title)}</title>\n<style>${css}</style>\n</head>\n<body>\n${reportHtml(m)}\n</body>\n</html>\n`;
+}
+
+/** Word opens this as a normal document. It is HTML with Word's page settings, saved as .doc. */
+export function reportWord(m) {
+  return reportDocument(m).replace("<html lang=\"en\">", '<html lang="en" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word">')
+    .replace("</head>", "<!--[if gte mso 9]><xml><w:WordDocument><w:View>Print</w:View></w:WordDocument></xml><![endif]-->\n</head>");
+}
+
+/** A one-page update for people who will not read the whole report: the call, why, the dates and the risks. */
+export function statusModel(m) {
+  const keep = ["Summary", "When", "Risk analysis", "Accepted risks"];
+  return { ...m, title: `${m.name} status update`, sections: m.sections.filter((x) => keep.includes(x.title)) };
 }
 
 /** The report as Markdown. Kept under its original name for existing callers. */

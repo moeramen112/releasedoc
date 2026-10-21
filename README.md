@@ -157,3 +157,10 @@ scripts/           build-standalone.mjs makes the single-file planner
 5. **The design choice (20 seconds).** "If a data source is down, that criterion is pending, not passing. A tool that says GO when it cannot see is worse than no tool."
 
 Questions to expect: why these weights (opinions with tests, meant to be tuned), what about monorepos or many services (one release per config today, and the per-team config is the next step), how it would connect to your systems (adapters return one shape, so a new source is one file).
+
+## New in the planner
+
+- **Dependencies**: a Team and a Blocked by column on tickets, handoffs between teams (back end to front end, merge to QA, design to tickets), a Dependencies panel, a risk factor and a section in the brief. Jira "is blocked by" links come in on refresh.
+- **Release docs**: in the Release brief panel, **Copy for Docs**, **Word (.doc)**, **Printable page** (print, then Save as PDF) and a **Status one-pager** for leadership.
+
+The hosted page at the GitHub Pages link keeps everything in your browser. Login, shared saving, auto-refresh and Slack alerts need a server and live in the `releasedoclogin` project.

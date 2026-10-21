@@ -1,5 +1,5 @@
 // Builds dist/release-planner.html: the planner as one self-contained page with no server.
-// It bundles engine.js, risk.js, plan.js and plan-ui.js, each in its own scope so names cannot collide.
+// It bundles deps.js, engine.js, risk.js, plan.js and plan-ui.js, each in its own scope so names cannot collide.
 // Run: node scripts/build-standalone.mjs
 
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
@@ -21,10 +21,11 @@ const html = read("public/plan.html");
 const bodyInner = html.slice(html.indexOf("<body>") + 6, html.indexOf('<script type="module"')).replace(/<nav class="nav"[\s\S]*?<\/nav>/, "").trim();
 const css = read("public/styles.css");
 const scripts = [
+  wrap("deps", read("src/deps.js")),
   wrap("engine", read("src/engine.js")),
   wrap("risk", read("src/risk.js")),
   wrap("plan", read("src/plan.js")),
-  `window.__STANDALONE = true;\n(() => {\n${read("public/plan-ui.js").replace(/function download\([^)]*\) \{[\s\S]*?\n\}\n/, "function download() {} // file downloads are not available in an embedded page\n").replace(/^import\s+\{([^}]+)\}\s+from\s+"[^"]*?([\w-]+)\.js";?\s*$/gm, (_, names, mod) => `const {${names}} = __mod_${mod};`)}\n})();`,
+  `window.__STANDALONE = true;\n(() => {\n${read("public/plan-ui.js").replace(/function download\([^)]*\) \{[\s\S]*?\n\}\n/, "function download(name, text, type) { // embedded previews cannot save files; the GitHub Pages copy sets __DOWNLOADS\n  if (window.__DOWNLOADS !== true) return;\n  const url = URL.createObjectURL(new Blob([text], { type }));\n  const a = document.createElement(\"a\");\n  a.href = url; a.download = name;\n  document.body.appendChild(a); a.click(); a.remove();\n  setTimeout(() => URL.revokeObjectURL(url), 1000);\n}\n").replace(/^import\s+\{([^}]+)\}\s+from\s+"[^"]*?([\w-]+)\.js";?\s*$/gm, (_, names, mod) => `const {${names}} = __mod_${mod};`)}\n})();`,
 ].join("\n");
 
 const headParts = `<title>Release Planner</title>
@@ -44,4 +45,8 @@ mkdirSync(path.join(root, "dist"), { recursive: true });
 writeFileSync(path.join(root, "dist/release-planner.html"), fragment);
 // A full document too, for opening the file directly from disk.
 writeFileSync(path.join(root, "dist/release-planner.standalone.html"), `<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n<meta name="viewport" content="width=device-width, initial-scale=1">\n${headParts}\n</head>\n<body>\n${bodyParts}\n</body>\n</html>\n`);
+// A view-only copy of the same page, for sharing a link. It shows the example release and cannot be edited or saved.
+const roScripts = scripts.replace("window.__STANDALONE = true;", "window.__STANDALONE = true;\nwindow.__READONLY = true;");
+const roHead = headParts.replace("<title>Release Planner</title>", "<title>Release Planner Preview</title>");
+writeFileSync(path.join(root, "dist/release-planner.readonly.html"), `${roHead}\n${bodyInner}\n<script>\n${roScripts}\n</script>\n`);
 console.log(`Wrote dist/release-planner.html (${(fragment.length / 1024).toFixed(0)} KB)`);

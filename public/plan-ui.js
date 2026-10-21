@@ -2,13 +2,17 @@
 // The same engine and risk model the server uses run here, in the browser.
 import { evaluate } from "/engine.js";
 import { computeRisk } from "/risk.js";
-import { defaultPlan, blankPlan, nextPlan, applyTemplate, generateRunbook, planToSnapshot, planState, planConfig, briefMarkdown, TYPES, PRIORITIES, TICKET_TYPES, STATUSES, AREAS, ENVIRONMENTS, STRATEGIES, CHECK_STATES, PHASES, ROLE_KEYS, TEMPLATES } from "/plan.js";
+import { analyzeDependencies, parseKeys, TEAMS, HANDOFF_STATUS } from "/deps.js";
+import { mergeTickets, defaultPlan, blankPlan, nextPlan, applyTemplate, generateRunbook, planToSnapshot, planState, planConfig, briefMarkdown, reportModel, reportHtml, reportDocument, reportWord, statusModel, TYPES, PRIORITIES, TICKET_TYPES, STATUSES, AREAS, ENVIRONMENTS, STRATEGIES, CHECK_STATES, PHASES, ROLE_KEYS, TEMPLATES } from "/plan.js";
 
 const $ = (s, r = document) => r.querySelector(s);
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const OLD_KEY = "rr.plan.v1"; // the single plan the first version of the planner saved
 const LIB_KEY = "rr.releases.v1";
+const CAN_DOWNLOAD = typeof window !== "undefined" && window.__DOWNLOADS === true; // the GitHub Pages copy is a real page, so downloads work there
 const STANDALONE = typeof window !== "undefined" && window.__STANDALONE === true;
+// The shareable preview: the example release, nothing can be changed, nothing is saved.
+const READONLY = typeof window !== "undefined" && window.__READONLY === true;
 const RUN_STATUS = ["todo", "doing", "done", "blocked"];
 const LABEL = { pass: "Pass", warn: "At risk", fail: "Failing", pending: "Pending", waived: "Waived" };
 const chip = (s) => `<span class="chip s-${s}"><i></i>${LABEL[s]}</span>`;
@@ -37,9 +41,12 @@ function fillDefaults(def, val) {
 /* ---------- the release library: every release you have entered, saved in this browser ---------- */
 
 const newId = () => "r" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+// What a saved plan is filled in from. Handoffs start empty, so an older plan never picks up the example's.
+const FILL = () => ({ ...defaultPlan(), handoffs: [] });
 const validPlan = (p) => Boolean(p && Array.isArray(p.tickets) && p.release);
 
 function loadLib() {
+  if (READONLY) { const id = newId(); return { current: id, order: [id], items: { [id]: { ...defaultPlan(), id } } }; }
   try {
     const raw = store.get(LIB_KEY);
     if (raw) {
@@ -47,14 +54,14 @@ function loadLib() {
       const order = (l.order || []).filter((id) => validPlan(l.items?.[id]));
       if (order.length) {
         const items = {};
-        for (const id of order) items[id] = { ...fillDefaults(defaultPlan(), l.items[id]), id };
+        for (const id of order) items[id] = { ...fillDefaults(FILL(), l.items[id]), id };
         return { current: items[l.current] ? l.current : order[0], order, items };
       }
     }
     const old = store.get(OLD_KEY); // keep whatever the first version saved
     if (old) {
       const p = JSON.parse(old);
-      if (validPlan(p)) { const id = newId(); return { current: id, order: [id], items: { [id]: { ...fillDefaults(defaultPlan(), p), id } } }; }
+      if (validPlan(p)) { const id = newId(); return { current: id, order: [id], items: { [id]: { ...fillDefaults(FILL(), p), id } } }; }
     }
   } catch { /* fall through to the example */ }
   const id = newId();
@@ -63,7 +70,142 @@ function loadLib() {
 
 let lib = loadLib();
 let P = lib.items[lib.current];
-function saveLib() { lib.items[lib.current] = P; store.set(LIB_KEY, JSON.stringify(lib)); }
+
+/* ---------- saving ----------
+   The single-file copy saves in this browser. Served by the server, releases are saved there instead,
+   so everyone signed in sees the same ones. Each save names the version it started from; if someone
+   else saved first, the server refuses and nothing is overwritten. */
+
+const RH = { "Content-Type": "application/json", "X-Requested-With": "release-readiness" };
+let remote = null; // { me, versions, pushed, chain, conflict, deleting }
+let lastEdit = 0;
+const readOnly = () => Boolean(remote && remote.me.role === "viewer");
+const toLogin = () => location.replace("/login.html?next=" + encodeURIComponent(location.pathname));
+
+function saveLib() {
+  lib.items[lib.current] = P;
+  if (READONLY) return;
+  if (remote) { pushRemote(lib.current); return; }
+  store.set(LIB_KEY, JSON.stringify(lib));
+}
+
+function setSaveState(text, kind = "") {
+  const el = document.querySelector("#save-state");
+  if (el) { el.textContent = text; el.className = "msg save-state " + kind; }
+}
+
+function pushRemote(id) {
+  if (readOnly()) return;
+  remote.chain = remote.chain.then(async () => {
+    const plan = lib.items[id]; // the newest copy, not whatever was current when this was queued
+    if (!plan || remote.conflict === id) return;
+    const body = JSON.stringify(plan);
+    if (remote.pushed[id] === body) return;
+    setSaveState("Saving…");
+    try {
+      const res = await fetch("/api/releases/" + id, { method: "PUT", headers: RH, body: JSON.stringify({ plan, baseVersion: remote.versions[id] || 0 }) });
+      const d = await res.json().catch(() => ({}));
+      if (res.status === 401) { toLogin(); return; }
+      if (res.status === 409) { remote.conflict = id; showConflict(d.error); setSaveState("Not saved", "bad"); return; }
+      if (!res.ok) throw new Error(d.error || `Request failed (${res.status}).`);
+      remote.versions[id] = d.version;
+      remote.pushed[id] = body;
+      setSaveState("Saved " + new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }), "ok");
+    } catch (e) {
+      setSaveState("Not saved: " + e.message, "bad");
+    }
+  });
+}
+
+function removeRemote(id) {
+  remote.deleting.add(id);
+  remote.chain = remote.chain.then(async () => {
+    try {
+      const res = await fetch("/api/releases/" + id, { method: "DELETE", headers: RH });
+      if (res.status === 401) { toLogin(); return; }
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `Request failed (${res.status}).`);
+      delete remote.versions[id]; delete remote.pushed[id];
+    } catch (e) {
+      setSaveState("Could not delete on the server: " + e.message, "bad");
+    } finally {
+      remote.deleting.delete(id);
+    }
+  });
+}
+
+function showConflict(message) {
+  const el = $("#rel-msg");
+  if (!el) return;
+  el.className = "msg bad";
+  el.innerHTML = `${esc(message || "Someone else changed this release.")} Your edits here are <strong>not saved</strong>. <button class="btn small" type="button" data-act="conflict-load">Load their version</button> <button class="btn small" type="button" data-act="conflict-copy">Keep mine as a copy</button>`;
+}
+
+const fromServer = (r) => ({ ...fillDefaults(FILL(), r.plan), id: r.id });
+function adopt(r) {
+  const plan = fromServer(r);
+  lib.items[r.id] = plan;
+  remote.versions[r.id] = r.version;
+  remote.pushed[r.id] = JSON.stringify(plan); // same as the server's copy, so loading never counts as an edit
+  return plan;
+}
+
+function startRemote(d) {
+  remote = { me: d.me, versions: {}, pushed: {}, chain: Promise.resolve(), conflict: null, deleting: new Set() };
+  lib = { current: "", order: [], items: {} };
+  for (const r of d.releases) { adopt(r); lib.order.push(r.id); }
+  if (!lib.order.length) {
+    const id = newId();
+    lib.items[id] = { ...blankPlan(Date.now()), id };
+    lib.order.push(id);
+  }
+  const wanted = new URLSearchParams(location.search).get("release") || store.get("rr.current");
+  lib.current = lib.items[wanted] ? wanted : lib.order[0];
+  P = lib.items[lib.current];
+  if (readOnly()) {
+    const t = $(".relbar .toolbar"); if (t) t.inert = true;
+    const sv = $("#save-state"); if (sv) sv.textContent = "View only";
+  }
+}
+
+/** Pick up other people's saves. Never replaces what you are in the middle of typing. */
+async function pollServer() {
+  if (!remote || document.hidden) return;
+  try {
+    const res = await fetch("/api/releases");
+    if (res.status === 401) { toLogin(); return; }
+    if (!res.ok) return;
+    const d = await res.json();
+    const idle = Date.now() - lastEdit > 5000 && !remote.conflict;
+    const onServer = new Set(d.releases.map((r) => r.id));
+    let redraw = false, note = "";
+    for (const r of d.releases) {
+      if (remote.deleting.has(r.id)) continue;
+      const known = remote.versions[r.id];
+      if (known === undefined) {
+        if (lib.items[r.id]) continue; // made here, still saving
+        adopt(r); lib.order.push(r.id); redraw = true;
+      } else if (r.version > known) {
+        if (r.id === lib.current && !idle) continue; // saving will report the clash
+        adopt(r);
+        if (r.id === lib.current) { P = lib.items[r.id]; redraw = "page"; note = `Updated with changes from ${r.updatedBy}.`; }
+        else redraw = redraw || true;
+      }
+    }
+    for (const id of [...lib.order]) {
+      if (remote.versions[id] !== undefined && !onServer.has(id) && !remote.deleting.has(id)) {
+        lib.order.splice(lib.order.indexOf(id), 1);
+        delete lib.items[id]; delete remote.versions[id]; delete remote.pushed[id];
+        redraw = true;
+        if (id === lib.current) {
+          if (!lib.order.length) { const b = { ...blankPlan(Date.now()), id: newId() }; lib.items[b.id] = b; lib.order.push(b.id); }
+          lib.current = lib.order[0]; P = lib.items[lib.current]; redraw = "page"; note = "Someone deleted the release you had open.";
+        }
+      }
+    }
+    if (redraw === "page") { showRelease(); if (note) sayRel(note, false, "ok"); }
+    else if (redraw) renderRelSelect();
+  } catch { /* try again at the next poll */ }
+}
 
 let openWaive = null;
 let waiveError = "";
@@ -194,8 +336,12 @@ function renderInputs() {
       { p: "scope.velocity", l: "Team velocity", t: "number", suffix: "points per working day" },
       { p: "scope.bigAt", l: "Large ticket at", t: "number", suffix: "points or more" },
     ].map(fieldHtml).join("")}</div>
-     <div class="tablewrap"><table class="tbl" style="min-width:1020px"><thead><tr><th>Key</th><th>Summary</th><th>Type</th><th>Pri</th><th>Pts</th><th>Status</th><th>Assignee</th><th>Area</th><th title="Includes a database migration">Mig</th><th title="Customers will see this">Cust</th><th title="Lacks automated tests">No tests</th><th></th></tr></thead><tbody id="tickets-body"></tbody></table></div>
+     <div class="tablewrap"><table class="tbl tk" style="min-width:1340px"><thead><tr><th>Key</th><th>Summary</th><th title="The team doing the work">Team</th><th title="Tickets that must be Done first. Separate keys with commas.">Blocked by</th><th>Type</th><th>Pri</th><th>Pts</th><th>Status</th><th>Assignee</th><th>Area</th><th title="Includes a database migration">Mig</th><th title="Customers will see this">Cust</th><th title="Lacks automated tests">No tests</th><th></th></tr></thead><tbody id="tickets-body"></tbody></table></div>
      <div class="row-actions"><button class="btn small" type="button" data-act="add-ticket">Add ticket</button><button class="btn small" type="button" data-act="pull-jira" id="b-jira">Pull from Jira</button><button class="btn small" type="button" data-act="refresh-jira" id="b-jira-refresh" title="Update statuses and points of the tickets below, and add new ones. Keeps tickets you typed by hand.">Refresh from Jira</button><span id="tk-clear"></span><span class="msg" id="tk-sum"></span><span class="msg" id="jira-msg"></span></div>`);
+
+  html += section("handoffs", "Handoffs between teams", "Work one team must hand to another before it can start. Each handoff blocks the tickets you name until it is Done.",
+    `<div class="tablewrap"><table class="tbl" style="min-width:1000px"><thead><tr><th>Handed over</th><th>From</th><th>To</th><th>Owner</th><th>Due</th><th>Status</th><th title="Ticket keys, separated by commas">Blocks</th><th></th></tr></thead><tbody id="handoffs-body"></tbody></table></div>
+     <div class="row-actions"><button class="btn small" type="button" data-act="add-handoff">Add handoff</button><span class="msg">Ticket-to-ticket dependencies go in the Blocked by column above.</span></div>`);
 
   html += section("signals", "Quality signals", "What the engine checks against budgets. With GitHub and CI connected these fill in on their own.",
     SIGNAL_GROUPS.map((g) => `<div class="sec-head"><h2>${esc(g.title)}</h2></div><div class="fields">${g.fields.map(fieldHtml).join("")}</div>`).join(""));
@@ -215,9 +361,37 @@ function renderInputs() {
   renderSignoffs();
   renderPeopleList();
   renderTickets();
+  renderHandoffs();
   renderRunbook();
   renderClear(true);
   updateJiraButton();
+}
+
+const TEAM_OPTS = [{ v: "", l: "—" }, ...TEAMS.map((x) => ({ v: x, l: x }))];
+
+/** A note when a "blocked by" names a ticket that is not in this release. */
+function blockedUnknown(t) {
+  const known = new Set(P.tickets.map((x) => String(x.key).toUpperCase()));
+  const bad = parseKeys(t.blockedBy).filter((k) => !known.has(k) && k !== String(t.key).toUpperCase());
+  return bad.length ? `${bad.join(", ")} ${bad.length === 1 ? "is" : "are"} not in this release's ticket list, so ${bad.length === 1 ? "it counts" : "they count"} as unresolved.` : "";
+}
+
+function renderHandoffs() {
+  const body = $("#handoffs-body");
+  if (!body) return;
+  P.handoffs ||= [];
+  body.innerHTML = P.handoffs.map((h, i) => {
+    const b = `handoffs.${i}`;
+    return `<tr>
+      <td><input class="s" type="text" data-p="${b}.what" value="${esc(h.what)}" placeholder="Final designs" aria-label="What is handed over"></td>
+      <td>${selectHtml(`${b}.from`, TEAM_OPTS, h.from || "", `class="tm" aria-label="From team"`)}</td>
+      <td>${selectHtml(`${b}.to`, TEAM_OPTS, h.to || "", `class="tm" aria-label="To team"`)}</td>
+      <td><input class="ow" type="text" list="people-list" data-p="${b}.owner" value="${esc(h.owner)}" aria-label="Owner"></td>
+      <td><input class="wh" type="datetime-local" data-p="${b}.due" value="${esc(h.due)}" aria-label="Due"></td>
+      <td>${selectHtml(`${b}.status`, HANDOFF_STATUS, h.status || "Not started", `class="st" aria-label="Status"`)}</td>
+      <td><input class="bb mono" type="text" data-p="${b}.blocks" value="${esc(h.blocks)}" placeholder="REL-1, REL-2" aria-label="Tickets this blocks"></td>
+      <td><button class="icon-btn" type="button" data-act="del-handoff" data-i="${i}" aria-label="Remove handoff">×</button></td></tr>`;
+  }).join("") || `<tr><td colspan="8" class="msg">No handoffs yet. Add one for anything a team must hand over before another can start, such as designs before tickets, or a merge before QA.</td></tr>`;
 }
 
 function renderTickets() {
@@ -227,6 +401,8 @@ function renderTickets() {
     return `<tr>
       <td><input class="k mono" type="text" data-p="${b}.key" value="${esc(t.key)}" aria-label="Ticket key"></td>
       <td><input class="s" type="text" data-p="${b}.summary" value="${esc(t.summary)}" aria-label="Summary for ${esc(t.key)}"></td>
+      <td>${selectHtml(`${b}.team`, TEAM_OPTS, t.team || "", `class="tm" aria-label="Team for ${esc(t.key)}"`)}</td>
+      <td><input class="bb mono${blockedUnknown(t) ? " warn-in" : ""}" type="text" data-p="${b}.blockedBy" value="${esc(t.blockedBy || "")}" placeholder="REL-1, REL-2" aria-label="Blocked by, for ${esc(t.key)}"${blockedUnknown(t) ? ` title="${esc(blockedUnknown(t))}"` : ""}></td>
       <td>${selectHtml(`${b}.type`, TICKET_TYPES, t.type, `class="ty" aria-label="Type"`)}</td>
       <td>${selectHtml(`${b}.priority`, PRIORITIES, t.priority, `class="pr" aria-label="Priority"`)}</td>
       <td><input class="pt" type="number" min="0" step="0.5" data-p="${b}.points" value="${esc(t.points)}" aria-label="Story points for ${esc(t.key)}"></td>
@@ -235,7 +411,7 @@ function renderTickets() {
       <td>${selectHtml(`${b}.area`, AREAS, t.area, `class="ar" aria-label="Area"`)}</td>
       ${tag("migration", "Migration")}${tag("customerFacing", "Customer facing")}${tag("untested", "Lacks tests")}
       <td><button class="icon-btn" type="button" data-act="del-ticket" data-i="${i}" aria-label="Remove ${esc(t.key)}">×</button></td></tr>`;
-  }).join("") || `<tr><td colspan="12" class="msg">No tickets yet. Add one, or pull the fix version from Jira.</td></tr>`;
+  }).join("") || `<tr><td colspan="14" class="msg">No tickets yet. Add one, or pull the fix version from Jira.</td></tr>`;
 }
 
 function renderRunbook() {
@@ -317,6 +493,7 @@ function renderRelSelect() {
 
 function showRelease() {
   openWaive = null; waiveError = "";
+  if (remote) store.set("rr.current", lib.current);
   saveLib();
   renderInputs();
   renderResults();
@@ -346,6 +523,7 @@ function deleteRelease() {
   lastDeleted = { plan: P, idx };
   lib.order.splice(idx, 1);
   delete lib.items[id];
+  if (remote) removeRemote(id);
   if (!lib.order.length) { const b = { ...blankPlan(Date.now(), P.release.type), id: newId() }; lib.items[b.id] = b; lib.order.push(b.id); }
   lib.current = lib.order[Math.min(idx, lib.order.length - 1)];
   P = lib.items[lib.current];
@@ -366,7 +544,9 @@ function compute() {
   const snapshot = planToSnapshot(P, now);
   const result = evaluate(snapshot, planConfig(P), planState(P));
   const risk = computeRisk(P, now);
-  return { now, result, risk, brief: briefMarkdown(P, result, risk, now) };
+  const deps = analyzeDependencies(P.tickets, P.handoffs, now, Date.parse(P.when.freezeAt) || null);
+  const model = reportModel(P, result, risk, now);
+  return { now, result, risk, deps, model, brief: briefMarkdown(P, result, risk, now) };
 }
 
 const ratioColor = (r) => (r >= 0.66 ? "var(--bad)" : r >= 0.33 ? "var(--warn)" : "var(--good)");
@@ -429,6 +609,24 @@ function renderPoints({ risk }) {
     <div>${areas.map(([a, v]) => `<div class="area-row"><span>${esc(a)}</span><div class="fb"><i style="width:${v.total ? (v.done / v.total) * 100 : 0}%"></i></div><span class="mono">${v.done}/${v.total}</span></div>`).join("")}</div></section>`;
 }
 
+function renderDeps({ result, deps }) {
+  const c = result.criteria.find((x) => x.id === "deps");
+  const head = `<div class="panel-head"><h2>Dependencies</h2>${c ? chip(c.effective) : ""}</div>`;
+  if (!deps.any) return `<section class="panel">${head}<div class="msg">Nothing entered yet. Use <strong>Team</strong> and <strong>Blocked by</strong> on the tickets, and <strong>Handoffs between teams</strong> below them, to show what waits on what. Pulling from Jira fills in "is blocked by" links for you.</div></section>`;
+  const on = (w) => w.on.map((x) => (x.kind === "handoff" ? `${esc(x.what)} <span class="msg">(${esc(x.team || "handoff")}, ${esc(x.status)})</span>` : `<span class="mono">${esc(x.key)}</span> <span class="msg">(${esc(x.status)})</span>`)).join(", ");
+  const h3 = (t) => `<div class="sec-head"><h2>${esc(t)}</h2></div>`;
+  let html = head + (c ? `<div class="msg">${esc(c.detail)}</div>` : "");
+  if (deps.cycles.length) html += `<div class="banner bad" role="alert"><strong>Circular dependency.</strong><span>${deps.cycles.map((x) => esc([...x, x[0]].join(" → "))).join("; ")}. None of these can start until one of the links is removed.</span></div>`;
+  if (deps.longestChain.length >= 2) html += h3("Longest chain, in the order it must happen") + `<div class="ladder">${deps.longestChain.keys.map((k, i) => `${i ? '<span class="arrow">→</span>' : ""}<span class="step mono">${esc(k)}</span>`).join("")}</div>`;
+  if (deps.finishFirst.length) html += h3("Finish these first") + `<ul class="plain">${deps.finishFirst.map((x) => `<li><span class="mono">${esc(x.key)}</span>${x.team ? ` <span class="msg">${esc(x.team)}</span>` : ""} ${esc(x.summary)}: holds up ${x.unblocks} ${x.unblocks === 1 ? "ticket" : "tickets"}</li>`).join("")}</ul>`;
+  if (deps.waiting.length) html += h3("Waiting") + `<div class="tablewrap"><table class="tbl"><thead><tr><th>Ticket</th><th>Team</th><th>Status</th><th>Waiting on</th></tr></thead><tbody>${deps.waiting.map((w) => `<tr><td><span class="mono">${esc(w.key)}</span> ${esc(w.summary)}</td><td>${esc(w.team || "—")}</td><td>${esc(w.status)}</td><td>${on(w)}</td></tr>`).join("")}</tbody></table></div>`;
+  if (deps.startedEarly.length) html += h3("Started before the input was done") + `<ul class="plain">${deps.startedEarly.map((w) => `<li><span class="mono">${esc(w.key)}</span> is ${esc(w.status.toLowerCase())} but waiting on ${on(w)}</li>`).join("")}</ul>`;
+  if (deps.ready.length) html += h3("Ready to start now") + `<ul class="plain">${deps.ready.map((x) => `<li><span class="mono">${esc(x.key)}</span> ${esc(x.summary)}</li>`).join("")}</ul>`;
+  const lateH = [...deps.handoffs.overdue.map((x) => `${esc(x.what)} (${esc(x.from || "?")} to ${esc(x.to || "?")}) is overdue`), ...deps.handoffs.blocked.map((x) => `${esc(x.what)} is blocked`), ...deps.handoffs.afterFreeze.map((x) => `${esc(x.what)} is due after the code freeze`)];
+  if (lateH.length) html += h3("Handoffs to chase") + `<ul class="plain">${lateH.map((x) => `<li>${x}</li>`).join("")}</ul>`;
+  return `<section class="panel">${html}</section>`;
+}
+
 function renderCriteria({ result }) {
   const order = { fail: 0, warn: 1, pending: 2, waived: 3, pass: 4 };
   const sorted = [...result.criteria].sort((a, b) => order[a.effective] - order[b.effective]);
@@ -448,7 +646,7 @@ function renderCriteria({ result }) {
 }
 
 function renderBrief({ brief }) {
-  return `<section class="panel"><div class="panel-head"><h2>Release brief</h2><div class="row-actions"><button class="btn small" type="button" data-act="copy-brief">Copy Markdown</button>${STANDALONE ? "" : `<button class="btn small" type="button" data-act="download-brief">Download .md</button>`}<span class="msg" id="brief-msg"></span></div></div><pre class="brief" id="brief">${esc(brief)}</pre></section>`;
+  return `<section class="panel"><div class="panel-head"><h2>Release brief</h2><div class="row-actions"><button class="btn small" type="button" data-act="copy-doc" title="Paste into Google Docs, Word, Confluence or Notion with formatting kept">Copy for Docs</button><button class="btn small" type="button" data-act="copy-brief">Copy Markdown</button>${STANDALONE && !CAN_DOWNLOAD ? "" : `<button class="btn small" type="button" data-act="download-word">Word (.doc)</button><button class="btn small" type="button" data-act="download-doc" title="Open it, then Print and Save as PDF">Printable page</button><button class="btn small" type="button" data-act="download-status" title="One page for leadership">Status one-pager</button><button class="btn small" type="button" data-act="download-brief">.md</button>`}<span class="msg" id="brief-msg"></span></div></div><pre class="brief" id="brief">${esc(brief)}</pre></section>`;
 }
 
 let last = null;
@@ -461,9 +659,10 @@ function renderResults() {
   }
   renderSumbar(last);
   const fresh = !P.release.name.trim() && P.tickets.length === 0 && !Number(P.signals.ci.total);
-  const note = fresh ? `<div class="banner"><strong>New release.</strong><span>Name it and set the dates on the left, then add tickets or pull them from Jira. The call stays HOLD until the checks have data, and anything unknown counts as risk.</span></div>` : "";
+  const roNote = READONLY ? `<div class="banner"><strong>View only.</strong><span>This is an example release with invented names and numbers. You can look at everything, but nothing can be changed or saved.</span></div>` : "";
+  const note = roNote + (fresh ? `<div class="banner"><strong>New release.</strong><span>Name it and set the dates on the left, then add tickets or pull them from Jira. The call stays HOLD until the checks have data, and anything unknown counts as risk.</span></div>` : "");
   renderRelSelect();
-  $("#results").innerHTML = note + renderVerdict(last) + renderRisk(last) + renderPoints(last) + renderCriteria(last) + renderBrief(last);
+  $("#results").innerHTML = note + renderVerdict(last) + renderRisk(last) + renderPoints(last) + renderDeps(last) + renderCriteria(last) + renderBrief(last);
   const p = last.risk.points;
   const sum = $("#tk-sum");
   if (sum) sum.textContent = `${p.tickets} tickets · ${p.total} points · ${p.done} done`;
@@ -473,6 +672,8 @@ function renderResults() {
 
 let raf = 0, saveTimer = 0;
 function changed() {
+  lastEdit = Date.now();
+  if (readOnly()) setSaveState("View only: changes are not saved.", "bad");
   clearTimeout(saveTimer);
   saveTimer = setTimeout(saveLib, 250);
   renderClear();
@@ -502,7 +703,7 @@ function onEdit(e) {
 document.addEventListener("input", onEdit);
 document.addEventListener("change", onEdit);
 
-const blankTicket = () => ({ key: "REL-", summary: "", type: "Story", priority: "P2", points: 0, status: "To do", assignee: "", area: "Core", tags: { migration: false, customerFacing: false, untested: false } });
+const blankTicket = () => ({ key: "REL-", summary: "", type: "Story", priority: "P2", points: 0, status: "To do", assignee: "", area: "Core", team: "", blockedBy: "", tags: { migration: false, customerFacing: false, untested: false } });
 
 function download(name, text, type) {
   const url = URL.createObjectURL(new Blob([text], { type }));
@@ -536,19 +737,10 @@ async function refreshJira() {
     const res = await fetch("/api/jira/issues?version=" + encodeURIComponent(version));
     const body = await res.json();
     if (!res.ok) throw new Error(body.error || `Request failed (${res.status}).`);
-    const byKey = new Map(body.issues.map((i) => [i.key, i]));
-    let updated = 0;
-    P.tickets = P.tickets.map((t) => {
-      const r = byKey.get(t.key);
-      if (!r) return t;
-      byKey.delete(t.key);
-      updated++;
-      return { ...t, ...r, tags: { ...(r.tags || {}), ...(t.tags || {}) } };
-    });
-    const added = [...byKey.values()];
-    P.tickets.push(...added);
+    const m = mergeTickets(P.tickets, body.issues);
+    P.tickets = m.tickets;
     renderTickets(); changed();
-    say("jira-msg", `Refreshed ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}: ${updated} updated, ${added.length} new, ${P.tickets.length - updated - added.length} not in Jira kept as they were.`, "ok");
+    say("jira-msg", `Refreshed ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}: ${m.updated} updated, ${m.added} new, ${m.kept} not in Jira kept as they were.`, "ok");
   } catch (e) {
     say("jira-msg", e.message, "bad");
   }
@@ -579,6 +771,12 @@ document.addEventListener("click", async (e) => {
     P.tickets.push(blankTicket()); renderTickets(); changed();
     const rows = document.querySelectorAll("#tickets-body tr"); rows[rows.length - 1]?.querySelector("input")?.focus();
   } else if (act === "del-ticket") { P.tickets.splice(i, 1); renderTickets(); changed(); }
+  else if (act === "add-handoff") {
+    (P.handoffs ||= []).push({ what: "", from: "Design", to: "Frontend", owner: "", due: P.when.freezeAt || "", status: "Not started", blocks: "" });
+    renderHandoffs(); changed();
+    const rows = document.querySelectorAll("#handoffs-body tr"); rows[rows.length - 1]?.querySelector("input")?.focus();
+  }
+  else if (act === "del-handoff") { P.handoffs.splice(i, 1); renderHandoffs(); changed(); }
   else if (act === "add-step") { P.runbook.push({ id: "s" + Date.now(), phase: "Deploy", step: "", owner: P.people.releaseManager, at: P.when.deployAt, status: "todo" }); renderRunbook(); changed(); }
   else if (act === "del-step") { P.runbook.splice(i, 1); renderRunbook(); changed(); }
   else if (act === "regen-runbook") { P.runbook = generateRunbook(P); renderRunbook(); changed(); say("rb-msg", "Runbook regenerated from the plan.", "ok"); }
@@ -622,6 +820,14 @@ document.addEventListener("click", async (e) => {
     try { await navigator.clipboard.writeText(text); say("brief-msg", "Copied.", "ok"); }
     catch { const r = document.createRange(); r.selectNodeContents($("#brief")); const s = getSelection(); s.removeAllRanges(); s.addRange(r); say("brief-msg", "Press Ctrl+C or Cmd+C to copy.", ""); }
   }
+  else if (act === "copy-doc") {
+    const html = reportHtml(last.model);
+    try { await navigator.clipboard.write([new ClipboardItem({ "text/html": new Blob([html], { type: "text/html" }), "text/plain": new Blob([last.brief], { type: "text/plain" }) })]); say("brief-msg", "Copied. Paste into your doc.", "ok"); }
+    catch { say("brief-msg", "Copy was blocked here. Use Copy Markdown instead.", "bad"); }
+  }
+  else if (act === "download-word") download(`${slug()}-release-doc.doc`, reportWord(last.model), "application/msword");
+  else if (act === "download-doc") download(`${slug()}-release-doc.html`, reportDocument(last.model), "text/html");
+  else if (act === "download-status") download(`${slug()}-status.html`, reportDocument(statusModel(last.model)), "text/html");
   else if (act === "download-brief") download(`${slug()}-brief.md`, last.brief, "text/markdown");
   else if (act === "copy-json") {
     try { await navigator.clipboard.writeText(JSON.stringify(P, null, 2)); say("brief-msg", "Plan JSON copied.", "ok"); } catch { say("brief-msg", "Copy was blocked here.", "bad"); }
@@ -646,6 +852,27 @@ document.addEventListener("click", async (e) => {
     sayRel("Duplicated. Changes here do not affect the original.", false, "ok");
   }
   else if (act === "rel-example") { addRelease(defaultPlan()); sayRel("Loaded the example release as a new entry.", false, "ok"); }
+  else if (act === "conflict-load" || act === "conflict-copy") {
+    const id = lib.current;
+    try {
+      const res = await fetch("/api/releases/" + id, { headers: RH });
+      if (res.status === 401) { toLogin(); return; }
+      const mine = JSON.parse(JSON.stringify(P));
+      if (res.ok) { adopt(await res.json()); P = lib.items[id]; }
+      else { // it was deleted: keep mine as a new release
+        delete remote.versions[id]; delete remote.pushed[id];
+      }
+      remote.conflict = null;
+      if (act === "conflict-copy" || !res.ok) {
+        mine.release.name = `${mine.release.name || "Untitled release"} (my edits)`;
+        addRelease(mine);
+        sayRel("Your edits are saved as a separate release.", false, "ok");
+      } else {
+        showRelease();
+        sayRel("Loaded the latest version.", false, "ok");
+      }
+    } catch (err) { sayRel("Could not load it: " + err.message, false, "bad"); }
+  }
   else if (act === "rel-delete") deleteRelease();
   else if (act === "rel-undo") {
     if (lastDeleted) {
@@ -700,7 +927,7 @@ $("#import-file").addEventListener("change", async (e) => {
   try {
     const p = JSON.parse(await file.text());
     if (!p || !Array.isArray(p.tickets) || !p.release) throw new Error("That file is not a release plan.");
-    addRelease(fillDefaults(defaultPlan(), p));
+    addRelease(fillDefaults(FILL(), p));
     sayRel(`Imported “${P.release.name || "Untitled release"}” as a new release.`, false, "ok");
   } catch (err) {
     $("#results").insertAdjacentHTML("afterbegin", `<div class="banner bad" role="alert"><strong>Could not import.</strong><span>${esc(err.message)}</span></div>`);
@@ -710,10 +937,30 @@ $("#import-file").addEventListener("change", async (e) => {
 /* ---------- start ---------- */
 
 (async function init() {
+  let offline = false;
+  if (!STANDALONE) {
+    try {
+      const res = await fetch("/api/releases");
+      if (res.status === 401) { toLogin(); return; }
+      if (res.ok) startRemote(await res.json());
+      else if (res.status !== 404) offline = true; // 404: this copy has no team storage, so it saves in the browser only
+    } catch { offline = true; }
+  }
   renderInputs();
   renderResults();
   saveLib();
+  if (READONLY) {
+    document.body.classList.add("ro");
+    for (const el of [$("#inputs"), $(".relbar .toolbar")]) if (el) el.inert = true;
+    setSaveState("View only");
+  }
   if (STANDALONE) return; // no server behind a single-file copy
+  if (offline) sayRel("Could not reach the server, so changes are saved only in this browser.", false, "bad");
+  else if (remote) {
+    if (readOnly()) { const i = $("#inputs"); if (i) i.inert = true; }
+    setInterval(pollServer, 20000);
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) pollServer(); });
+  }
   try {
     const res = await fetch("/api/config");
     if (res.ok) { const cfg = await res.json(); integrations = { jira: Boolean(cfg.integrations?.jira), server: true }; updateJiraButton(); }
