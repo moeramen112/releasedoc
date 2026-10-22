@@ -164,3 +164,25 @@ Questions to expect: why these weights (opinions with tests, meant to be tuned),
 - **Release docs**: in the Release brief panel, **Copy for Docs**, **Word (.doc)**, **Printable page** (print, then Save as PDF) and a **Status one-pager** for leadership.
 
 The hosted page at the GitHub Pages link keeps everything in your browser. Login, shared saving, auto-refresh and Slack alerts need a server and live in the `releasedoclogin` project.
+
+![Dependencies panel: longest chain, what to finish first, who is waiting, overdue handoffs](docs/dependencies.png)
+
+![Handoffs between teams, with owner, due date and status](docs/handoffs.png)
+
+![Release brief panel with Copy for Docs, Word, Printable page and Status one-pager](docs/release-docs.png)
+
+![Status one-pager for leadership](docs/status-onepager.png)
+
+How a release moves through the planner:
+
+```mermaid
+flowchart LR
+    A["Enter the release: people, dates, tickets, handoffs"] --> B["Rules check each criterion"]
+    B --> C{"GO, HOLD or NO-GO"}
+    D["Risk score out of 100"] --> C
+    E["Dependencies: waiting, chains, handoffs"] --> B
+    C --> F["Release brief"]
+    F --> G["Copy for Docs"]
+    F --> H["Word or printable page"]
+    F --> I["Status one-pager"]
+```
