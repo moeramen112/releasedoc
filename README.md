@@ -17,7 +17,8 @@ Before a release, someone collects status by hand from the issue tracker, CI, th
 - the same go/no-go call, using the same engine
 - a risk score out of 100 with a breakdown by factor, plain-language recommendations, and a suggested staged rollout
 - a story-point forecast: points done, points remaining, and whether the team's velocity can finish before the freeze
-- a runbook, prefilled from the dates, owners and rollout strategy
+- a runbook, prefilled from the dates, owners and rollout strategy, with one click to add a step for each open handoff
+- release history: record how each release went, and see how past calls held up against what happened
 - a release brief in Markdown (who, what, when, where, how, risk, criteria, runbook) to paste into Slack or Confluence
 
 ![Planner](docs/planner.png)
@@ -126,11 +127,12 @@ Levels: under 25 Low, under 50 Moderate, under 75 High, otherwise Critical. Each
 ```
 src/engine.js      criteria evaluators, waivers, verdict (pure)
 src/risk.js        story points, forecast, risk score (pure)
-src/plan.js        the plan, templates, runbook generator, brief (pure)
+src/plan.js        the plan, templates, runbook generator and handoff steps, brief (pure)
+src/history.js     release history: the call when closed, rows and summary (pure)
 src/sources/       GitHub, Jira, and demo-data adapters
 src/server.js      HTTP server and JSON API
 public/            dashboard and planner (plain JS, no build step)
-test/              62 tests, including a mock GitHub and a mock Jira
+test/              90 tests, including a mock GitHub and a mock Jira
 scripts/           build-standalone.mjs makes the single-file planner
 ```
 
@@ -146,7 +148,7 @@ scripts/           build-standalone.mjs makes the single-file planner
 1. Read CI status from the CI provider directly, and map it to the release branch automatically.
 2. Learn the weights from history: which factors preceded a rollback or an incident.
 3. Post to Slack on a schedule, and when a criterion changes state.
-4. Per-team criteria sets, and a record of every release for trend reporting.
+4. Per-team criteria sets, and trends over time in Release history.
 
 ## Demo script (three minutes)
 
@@ -162,6 +164,13 @@ Questions to expect: why these weights (opinions with tests, meant to be tuned),
 
 - **Dependencies**: a Team and a Blocked by column on tickets, handoffs between teams (back end to front end, merge to QA, design to tickets), a Dependencies panel, a risk factor and a section in the brief. Jira "is blocked by" links come in on refresh.
 - **Release docs**: in the Release brief panel, **Copy for Docs**, **Word (.doc)**, **Printable page** (print, then Save as PDF) and a **Status one-pager** for leadership.
+
+- **Runbook steps from handoffs**: under Runbook, **Add steps from handoffs** adds a Pre-release step for each handoff that is not Done, with the handoff's owner and due date. Press it again later and those steps follow their handoff's status. Nothing is removed, and steps you wrote are never touched.
+- **Release history**: the last section on the left, **After the release**, records how a release went (shipped cleanly, shipped with issues, rolled back, cancelled) with a note. That closes the release and saves the call and risk score as they were at that moment. The **Release history** panel at the bottom of the results lists closed releases, with counts and how each call held up. Clear the outcome to reopen it.
+
+![The runbook, with the Add steps from handoffs button](docs/runbook-handoffs.png)
+
+![Release history: outcome counts, how the call held up, and each closed release](docs/history.png)
 
 The hosted page at the GitHub Pages link keeps everything in your browser. Login, shared saving, auto-refresh and Slack alerts need a server and live in the `releasedoclogin` project.
 
