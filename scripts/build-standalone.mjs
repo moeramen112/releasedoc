@@ -1,5 +1,5 @@
 // Builds dist/release-planner.html: the planner as one self-contained page with no server.
-// It bundles deps.js, engine.js, risk.js, plan.js and plan-ui.js, each in its own scope so names cannot collide.
+// It bundles deps.js, engine.js, risk.js, plan.js, history.js and plan-ui.js, each in its own scope so names cannot collide.
 // Run: node scripts/build-standalone.mjs
 
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
@@ -25,6 +25,7 @@ const scripts = [
   wrap("engine", read("src/engine.js")),
   wrap("risk", read("src/risk.js")),
   wrap("plan", read("src/plan.js")),
+  wrap("history", read("src/history.js")),
   `window.__STANDALONE = true;\n(() => {\n${read("public/plan-ui.js").replace(/function download\([^)]*\) \{[\s\S]*?\n\}\n/, "function download(name, text, type) { // embedded previews cannot save files; the GitHub Pages copy sets __DOWNLOADS\n  if (window.__DOWNLOADS !== true) return;\n  const url = URL.createObjectURL(new Blob([text], { type }));\n  const a = document.createElement(\"a\");\n  a.href = url; a.download = name;\n  document.body.appendChild(a); a.click(); a.remove();\n  setTimeout(() => URL.revokeObjectURL(url), 1000);\n}\n").replace(/^import\s+\{([^}]+)\}\s+from\s+"[^"]*?([\w-]+)\.js";?\s*$/gm, (_, names, mod) => `const {${names}} = __mod_${mod};`)}\n})();`,
 ].join("\n");
 

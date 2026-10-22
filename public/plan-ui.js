@@ -3,7 +3,8 @@
 import { evaluate } from "/engine.js";
 import { computeRisk } from "/risk.js";
 import { analyzeDependencies, parseKeys, TEAMS, HANDOFF_STATUS } from "/deps.js";
-import { mergeTickets, defaultPlan, blankPlan, nextPlan, applyTemplate, generateRunbook, planToSnapshot, planState, planConfig, briefMarkdown, reportModel, reportHtml, reportDocument, reportWord, statusModel, TYPES, PRIORITIES, TICKET_TYPES, STATUSES, AREAS, ENVIRONMENTS, STRATEGIES, CHECK_STATES, PHASES, ROLE_KEYS, TEMPLATES } from "/plan.js";
+import { mergeTickets, defaultPlan, blankPlan, nextPlan, applyTemplate, generateRunbook, syncHandoffSteps, isClosed, OUTCOMES, planToSnapshot, planState, planConfig, briefMarkdown, reportModel, reportHtml, reportDocument, reportWord, statusModel, TYPES, PRIORITIES, TICKET_TYPES, STATUSES, AREAS, ENVIRONMENTS, STRATEGIES, CHECK_STATES, PHASES, ROLE_KEYS, TEMPLATES } from "/plan.js";
+import { applyOutcomeChange, historyRows, historySummary } from "/history.js";
 
 const $ = (s, r = document) => r.querySelector(s);
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -250,6 +251,11 @@ const SECTIONS = [
     { p: "how.dashboards", l: "Dashboards to watch", wide: true },
     { p: "how.verification", l: "Verification steps", t: "textarea", wide: true },
   ] },
+  { id: "after", title: "After the release", hint: "Record how it went. This closes the release and adds it to Release history.", fields: [
+    { p: "outcome.status", l: "How did it go", t: "select", o: [{ v: "", l: "Not released yet" }, ...OUTCOMES.map((v) => ({ v, l: v }))] },
+    { p: "outcome.at", l: "Closed on", t: "datetime" },
+    { p: "outcome.note", l: "What happened, and what to do differently next time", t: "textarea", wide: true },
+  ] },
 ];
 
 const SIGNAL_GROUPS = [
@@ -328,7 +334,7 @@ const section = (id, title, hint, body, head = "") =>
 
 function renderInputs() {
   addOpen = null;
-  let html = SECTIONS.map((s) => section(s.id, s.title, s.hint, `<div class="fields">${s.fields.map(fieldHtml).join("")}</div>` + (s.id === "who"
+  let html = SECTIONS.filter((s) => s.id !== "after").map((s) => section(s.id, s.title, s.hint, `<div class="fields">${s.fields.map(fieldHtml).join("")}</div>` + (s.id === "who"
     ? `<div id="extra-people" class="extra-people"></div><div id="person-add"></div><div class="row-actions"><button class="btn small" type="button" data-act="add-person">Add person</button><span class="msg">Add a role that is not listed, such as Legal or Support lead.</span></div>` : ""))).join("");
 
   html += section("tickets", "Jira tickets and story points", "Points drive the scope forecast. Bugs at P0 and P1 are treated as blockers until they are done.",
@@ -353,7 +359,10 @@ function renderInputs() {
 
   html += section("runbook", "Runbook", "Prefilled from the dates, owners and rollout strategy above. Edit any row.",
     `<div class="tablewrap"><table class="tbl" style="min-width:760px"><thead><tr><th>Phase</th><th>Step</th><th>Owner</th><th>When</th><th>Status</th><th></th></tr></thead><tbody id="runbook-body"></tbody></table></div>
-     <div class="row-actions"><button class="btn small" type="button" data-act="add-step">Add step</button><button class="btn small" type="button" data-act="regen-runbook">Regenerate from plan</button><span id="rb-clear"></span><span class="msg" id="rb-msg">Regenerating replaces your edits to these rows.</span></div>`);
+     <div class="row-actions"><button class="btn small" type="button" data-act="add-step">Add step</button><button class="btn small" type="button" data-act="handoff-steps" title="Adds a step for each handoff that is not done, and updates the ones it added before">Add steps from handoffs</button><button class="btn small" type="button" data-act="regen-runbook">Regenerate from plan</button><span id="rb-clear"></span><span class="msg" id="rb-msg">Regenerating replaces your edits to these rows.</span></div>`);
+
+  const after = SECTIONS.find((s) => s.id === "after");
+  html += section(after.id, after.title, after.hint, `<div class="fields">${after.fields.map(fieldHtml).join("")}</div>`);
 
   html += `<datalist id="people-list"></datalist>`;
   $("#inputs").innerHTML = html;
@@ -645,6 +654,20 @@ function renderCriteria({ result }) {
   return `<section class="panel"><div class="panel-head"><h2>Go/no-go criteria</h2><span class="note">A waiver needs a named approver and a reason.</span></div><div>${rows}</div></section>`;
 }
 
+const OUT_CHIP = { "Shipped cleanly": "pass", "Shipped with issues": "warn", "Rolled back": "fail", Cancelled: "waived" };
+const histWhen = (v) => { const t = Date.parse(v); return Number.isNaN(t) ? "" : new Date(t).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }); };
+
+/** Closed releases and how they turned out. */
+function renderHistory() {
+  const rows = historyRows(lib.order.map((id) => ({ ...(id === lib.current ? P : lib.items[id]), id }))), sum = historySummary(rows), currentId = lib.current;
+  const head = `<div class="panel-head"><h2>Release history</h2><span class="note">Releases with an outcome recorded under "After the release".</span></div>`;
+  if (!rows.length) return `<section class="panel" id="history-panel">${head}<div class="msg">No closed releases yet. When a release is done, pick how it went under <strong>After the release</strong> on the left and it will show up here with the call it had when it closed.</div></section>`;
+  const tally = [["clean", "shipped cleanly", "pass"], ["issues", "shipped with issues", "warn"], ["rolledBack", "rolled back", "fail"], ["cancelled", "cancelled", "waived"]].filter(([k]) => sum[k]).map(([k, l, c]) => `<span class="chip s-${c}"><i></i>${sum[k]} ${l}</span>`).join(" ");
+  const calls = ["GO", "HOLD", "NO-GO"].filter((c) => sum.byCall[c]).map((c) => `<li><strong>${esc(c)}</strong> at close: ${sum.byCall[c].shipped} shipped, ${sum.byCall[c].trouble} had issues or were rolled back</li>`).join("");
+  const body = rows.map((r) => `<tr><td>${esc(r.name)}${r.version ? ` <span class="mono">${esc(r.version)}</span>` : ""}<div class="msg">${esc(histWhen(r.at))}</div></td><td><span class="chip s-${OUT_CHIP[r.status] || "pending"}"><i></i>${esc(r.status)}</span></td><td>${r.call ? `${esc(r.call)}${r.risk === null ? "" : `<div class="msg">risk ${r.risk}</div>`}` : "—"}</td><td>${r.id === currentId ? `<span class="msg">Open now</span>` : `<button class="btn small" type="button" data-act="open-release" data-id="${esc(r.id)}">Open</button>`}</td></tr>${r.note ? `<tr><td colspan="4" class="msg">${esc(r.note.length > 200 ? r.note.slice(0, 200) + "…" : r.note)}</td></tr>` : ""}`).join("");
+  return `<section class="panel" id="history-panel">${head}<div class="row-actions">${tally}</div>${sum.shippedAgainstCall ? `<div class="msg">${sum.shippedAgainstCall} shipped while the call was HOLD or NO-GO.</div>` : ""}${calls ? `<ul class="plain">${calls}</ul>` : ""}<div class="tablewrap"><table class="tbl"><thead><tr><th>Release</th><th>Outcome</th><th>Call when closed</th><th></th></tr></thead><tbody>${body}</tbody></table></div></section>`;
+}
+
 function renderBrief({ brief }) {
   return `<section class="panel"><div class="panel-head"><h2>Release brief</h2><div class="row-actions"><button class="btn small" type="button" data-act="copy-doc" title="Paste into Google Docs, Word, Confluence or Notion with formatting kept">Copy for Docs</button><button class="btn small" type="button" data-act="copy-brief">Copy Markdown</button>${STANDALONE && !CAN_DOWNLOAD ? "" : `<button class="btn small" type="button" data-act="download-word">Word (.doc)</button><button class="btn small" type="button" data-act="download-doc" title="Open it, then Print and Save as PDF">Printable page</button><button class="btn small" type="button" data-act="download-status" title="One page for leadership">Status one-pager</button><button class="btn small" type="button" data-act="download-brief">.md</button>`}<span class="msg" id="brief-msg"></span></div></div><pre class="brief" id="brief">${esc(brief)}</pre></section>`;
 }
@@ -660,9 +683,10 @@ function renderResults() {
   renderSumbar(last);
   const fresh = !P.release.name.trim() && P.tickets.length === 0 && !Number(P.signals.ci.total);
   const roNote = READONLY ? `<div class="banner"><strong>View only.</strong><span>This is an example release with invented names and numbers. You can look at everything, but nothing can be changed or saved.</span></div>` : "";
-  const note = roNote + (fresh ? `<div class="banner"><strong>New release.</strong><span>Name it and set the dates on the left, then add tickets or pull them from Jira. The call stays HOLD until the checks have data, and anything unknown counts as risk.</span></div>` : "");
+  const closedNote = isClosed(P) ? `<div class="banner"><strong>Closed: ${esc(P.outcome.status)}.</strong><span>Clear the outcome under After the release to reopen it.</span></div>` : "";
+  const note = roNote + closedNote + (fresh ? `<div class="banner"><strong>New release.</strong><span>Name it and set the dates on the left, then add tickets or pull them from Jira. The call stays HOLD until the checks have data, and anything unknown counts as risk.</span></div>` : "");
   renderRelSelect();
-  $("#results").innerHTML = note + renderVerdict(last) + renderRisk(last) + renderPoints(last) + renderDeps(last) + renderCriteria(last) + renderBrief(last);
+  $("#results").innerHTML = note + renderVerdict(last) + renderRisk(last) + renderPoints(last) + renderDeps(last) + renderCriteria(last) + renderBrief(last) + renderHistory();
   const p = last.risk.points;
   const sum = $("#tk-sum");
   if (sum) sum.textContent = `${p.tickets} tickets · ${p.total} points · ${p.done} done`;
@@ -698,6 +722,7 @@ function onEdit(e) {
     setPath(P, el.dataset.p, el.value);
   }
   if (/^(people|extraPeople)\./.test(el.dataset.p)) renderPeopleList();
+  if (el.dataset.p === "outcome.status" && applyOutcomeChange(P, Date.now())) { const at = $("#f-outcome-at"); if (at) at.value = P.outcome.at || ""; }
   changed();
 }
 document.addEventListener("input", onEdit);
@@ -779,6 +804,12 @@ document.addEventListener("click", async (e) => {
   else if (act === "del-handoff") { P.handoffs.splice(i, 1); renderHandoffs(); changed(); }
   else if (act === "add-step") { P.runbook.push({ id: "s" + Date.now(), phase: "Deploy", step: "", owner: P.people.releaseManager, at: P.when.deployAt, status: "todo" }); renderRunbook(); changed(); }
   else if (act === "del-step") { P.runbook.splice(i, 1); renderRunbook(); changed(); }
+  else if (act === "handoff-steps") {
+    const r = syncHandoffSteps(P);
+    renderRunbook(); changed();
+    say("rb-msg", r.added || r.updated ? `${r.added} step${r.added === 1 ? "" : "s"} added, ${r.updated} updated from the handoffs.` : "The runbook already matches the handoffs.", "ok");
+  }
+  else if (act === "open-release") { openRelease(a.dataset.id); sayRel("Opened from Release history.", false, "ok"); }
   else if (act === "regen-runbook") { P.runbook = generateRunbook(P); renderRunbook(); changed(); say("rb-msg", "Runbook regenerated from the plan.", "ok"); }
   else if (act === "apply-template") {
     applyTemplate(P, P.release.type); renderInputs(); changed();
@@ -848,6 +879,7 @@ document.addEventListener("click", async (e) => {
   else if (act === "rel-dup") {
     const c = JSON.parse(JSON.stringify(P));
     c.release.name = `Copy of ${P.release.name || "Untitled release"}`;
+    c.outcome = { status: "", at: "", note: "", snapshot: null }; // a copy starts open
     addRelease(c);
     sayRel("Duplicated. Changes here do not affect the original.", false, "ok");
   }
