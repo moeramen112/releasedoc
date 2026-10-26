@@ -7,6 +7,7 @@ import { mergeTickets, defaultPlan, blankPlan, nextPlan, applyTemplate, generate
 import { applyOutcomeChange, historyRows, historySummary } from "/history.js";
 import { buildSchedule, conflictsFor } from "/schedule.js";
 import { renderClashBanner } from "/schedule-view.js";
+import { RAID_TYPES, RAID_STATUS, RAID_RATINGS, emptyRaid, summarizeRaid, isOverdue, isClosedRaid, suggestRaid, acceptSuggestion } from "/raid.js";
 
 const $ = (s, r = document) => r.querySelector(s);
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -45,7 +46,7 @@ function fillDefaults(def, val) {
 
 const newId = () => "r" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 // What a saved plan is filled in from. Handoffs start empty, so an older plan never picks up the example's.
-const FILL = () => ({ ...defaultPlan(), handoffs: [] });
+const FILL = () => ({ ...defaultPlan(), handoffs: [], raid: [] });
 const validPlan = (p) => Boolean(p && Array.isArray(p.tickets) && p.release);
 
 function loadLib() {
@@ -351,6 +352,10 @@ function renderInputs() {
     `<div class="tablewrap"><table class="tbl" style="min-width:1000px"><thead><tr><th>Handed over</th><th>From</th><th>To</th><th>Owner</th><th>Due</th><th>Status</th><th title="Ticket keys, separated by commas">Blocks</th><th></th></tr></thead><tbody id="handoffs-body"></tbody></table></div>
      <div class="row-actions"><button class="btn small" type="button" data-act="add-handoff">Add handoff</button><span class="msg">Ticket-to-ticket dependencies go in the Blocked by column above.</span></div>`);
 
+  html += section("raid", "RAID log", "Risks, assumptions, issues and dependencies for this release. Give each an owner and a date. The panel on the right suggests items from your tickets, handoffs and calendar.",
+    `<div class="tablewrap"><table class="tbl" style="min-width:1100px"><thead><tr><th>Type</th><th>What</th><th>Owner</th><th>Due</th><th>Rating</th><th>Status</th><th>What we are doing about it</th><th></th></tr></thead><tbody id="raid-body"></tbody></table></div>
+     <div class="row-actions"><button class="btn small" type="button" data-act="add-raid">Add item</button><span class="msg" id="raid-sum"></span></div>`);
+
   html += section("signals", "Quality signals", "What the engine checks against budgets. With GitHub and CI connected these fill in on their own.",
     SIGNAL_GROUPS.map((g) => `<div class="sec-head"><h2>${esc(g.title)}</h2></div><div class="fields">${g.fields.map(fieldHtml).join("")}</div>`).join(""));
 
@@ -373,6 +378,7 @@ function renderInputs() {
   renderPeopleList();
   renderTickets();
   renderHandoffs();
+  renderRaidTable();
   renderRunbook();
   renderClear(true);
   updateJiraButton();
@@ -403,6 +409,27 @@ function renderHandoffs() {
       <td><input class="bb mono" type="text" data-p="${b}.blocks" value="${esc(h.blocks)}" placeholder="REL-1, REL-2" aria-label="Tickets this blocks"></td>
       <td><button class="icon-btn" type="button" data-act="del-handoff" data-i="${i}" aria-label="Remove handoff">×</button></td></tr>`;
   }).join("") || `<tr><td colspan="8" class="msg">No handoffs yet. Add one for anything a team must hand over before another can start, such as designs before tickets, or a merge before QA.</td></tr>`;
+}
+
+function renderRaidTable() {
+  const body = $("#raid-body");
+  if (!body) return;
+  P.raid ||= [];
+  const now = Date.now();
+  body.innerHTML = P.raid.map((r, i) => {
+    const b = `raid.${i}`;
+    return `<tr${isClosedRaid(r) ? ' class="done"' : ""}>
+      <td>${selectHtml(`${b}.type`, RAID_TYPES, r.type, `class="tm" aria-label="Type"`)}</td>
+      <td><input class="s" type="text" data-p="${b}.title" value="${esc(r.title)}" placeholder="What could go wrong, or what must be true" aria-label="What"></td>
+      <td><input class="ow" type="text" list="people-list" data-p="${b}.owner" value="${esc(r.owner)}" aria-label="Owner"></td>
+      <td><input class="wh" type="datetime-local" data-p="${b}.due" value="${esc(r.due)}" aria-label="Due">${isOverdue(r, now) ? `<div class="msg" style="color:var(--bad)">overdue</div>` : ""}</td>
+      <td>${selectHtml(`${b}.rating`, RAID_RATINGS, r.rating, `class="st" aria-label="Rating"`)}</td>
+      <td>${selectHtml(`${b}.status`, RAID_STATUS[r.type] || RAID_STATUS.Risk, r.status, `class="st" aria-label="Status"`)}</td>
+      <td><input class="s" type="text" data-p="${b}.response" value="${esc(r.response)}" placeholder="Mitigation, fix or check" aria-label="Response"></td>
+      <td><button class="icon-btn" type="button" data-act="del-raid" data-i="${i}" aria-label="Remove item">×</button></td></tr>`;
+  }).join("") || `<tr><td colspan="8" class="msg">Nothing logged yet. Add an item, or accept a suggestion on the right.</td></tr>`;
+  const sum = summarizeRaid(P.raid, now), el = $("#raid-sum");
+  if (el) el.textContent = P.raid.length ? `${sum.open} open, ${sum.high} high, ${sum.overdue} overdue.` : "";
 }
 
 function renderTickets() {
@@ -674,6 +701,36 @@ function renderBrief({ brief }) {
   return `<section class="panel"><div class="panel-head"><h2>Release brief</h2><div class="row-actions"><button class="btn small" type="button" data-act="copy-doc" title="Paste into Google Docs, Word, Confluence or Notion with formatting kept">Copy for Docs</button><button class="btn small" type="button" data-act="copy-brief">Copy Markdown</button>${STANDALONE && !CAN_DOWNLOAD ? "" : `<button class="btn small" type="button" data-act="download-word">Word (.doc)</button><button class="btn small" type="button" data-act="download-doc" title="Open it, then Print and Save as PDF">Printable page</button><button class="btn small" type="button" data-act="download-status" title="One page for leadership">Status one-pager</button><button class="btn small" type="button" data-act="download-brief">.md</button>`}<span class="msg" id="brief-msg"></span></div></div><pre class="brief" id="brief">${esc(brief)}</pre></section>`;
 }
 
+/**
+ * The RAID digest in the results column: what is open and risky right now, plus suggestions to accept.
+ *  sum          from summarizeRaid()
+ *  top          the open items worth showing (already sorted and cut to a few)
+ *  suggestions  suggested items, each with a `source`
+ *  ctx          { canEdit, canAi, busy, msg }
+ */
+function renderRaid(sum, top, suggestions, { canEdit = true, canAi = false, busy = false, msg = "" } = {}) {
+  const chips = [`<span class="chip s-pending"><i></i>${sum.open} open</span>`, sum.high ? `<span class="chip s-fail"><i></i>${sum.high} high</span>` : "", sum.overdue ? `<span class="chip s-fail"><i></i>${sum.overdue} overdue</span>` : "", sum.noOwner ? `<span class="chip s-warn"><i></i>${sum.noOwner} without an owner</span>` : ""].filter(Boolean).join(" ");
+  const types = ["Risk", "Assumption", "Issue", "Dependency"].filter((t) => sum.byType[t]).map((t) => `${sum.byType[t]} ${t.toLowerCase()}${sum.byType[t] === 1 ? "" : "s"}`).join(", ");
+  const list = top.length ? `<ul class="plain">${top.map((r) => `<li><span class="chip s-${r.rating === "High" ? "fail" : r.rating === "Medium" ? "warn" : "pending"}">${esc(r.type)}</span> ${esc(r.title)}${r.owner ? ` <span class="msg">${esc(r.owner)}</span>` : ` <span class="msg">no owner</span>`}${r.overdue ? ` <span class="msg" style="color:var(--bad)">overdue</span>` : ""}</li>`).join("")}</ul>` : "";
+  const dis = canEdit ? "" : " disabled";
+  const sugg = suggestions.length
+    ? `<h3 class="ag-h">Suggested from this release (${suggestions.length})</h3><div class="ai-list">${suggestions.map((x) => `<div class="ai-item"><div><strong>${esc(x.title)}</strong> <span class="chip s-${x.rating === "High" ? "fail" : x.rating === "Medium" ? "warn" : "pending"}">${esc(x.type)}</span>${x.response ? `<div class="note">${esc(x.response)}</div>` : ""}</div><div class="row-actions"><button class="btn small primary" type="button" data-act="raid-accept" data-src="${esc(x.source)}"${dis}>Add</button><button class="btn small" type="button" data-act="raid-dismiss" data-src="${esc(x.source)}"${dis}>Dismiss</button></div></div>`).join("")}</div><div class="row-actions">${suggestions.length > 1 ? `<button class="btn small" type="button" data-act="raid-accept-all"${dis}>Add all</button>` : ""}</div>`
+    : `<div class="msg">Nothing new to suggest from the tickets, handoffs, risk score and calendar.</div>`;
+  const ai = canAi ? `<div class="row-actions"><button class="btn small" type="button" data-act="raid-ai"${busy || !canEdit ? " disabled" : ""} title="Asks Claude to read the tickets and handoffs and suggest risks and assumptions you have not listed. It only suggests.">${busy ? "Thinking…" : "Ask AI for more"}</button><span class="msg">${esc(msg)}</span></div>` : "";
+  return `<section class="panel" id="raid-panel"><div class="panel-head"><h2>RAID log</h2><span class="note">Risks, assumptions, issues and dependencies. Edit them under RAID on the left.</span></div><div class="row-actions">${chips}</div>${types ? `<div class="msg">${esc(types)}.</div>` : `<div class="msg">Nothing logged yet.</div>`}${list}${sugg}${ai}</section>`;
+}
+
+// RAID: what the panel on the right shows. Suggestions are worked out every time from the tickets, handoffs, risk score and calendar.
+const RA = { suggestions: [] };
+function raidPanel(clashes) {
+  const now = Date.now(), taken = new Set([...(P.raid || []).map((r) => r.source), ...(P.raidDismissed || [])]);
+  const suggestions = suggestRaid(P, { now, clashes }).filter((x) => !taken.has(x.source));
+  const open = (P.raid || []).filter((r) => !isClosedRaid(r)).map((r) => ({ ...r, overdue: isOverdue(r, now) }))
+    .sort((a, b) => Number(b.overdue) - Number(a.overdue) || RAID_RATINGS.indexOf(a.rating) - RAID_RATINGS.indexOf(b.rating)).slice(0, 5);
+  RA.suggestions = suggestions;
+  return renderRaid(summarizeRaid(P.raid || [], now), open, suggestions, { canEdit: !READONLY, canAi: false });
+}
+
 let last = null;
 function renderResults() {
   try {
@@ -686,10 +743,11 @@ function renderResults() {
   const fresh = !P.release.name.trim() && P.tickets.length === 0 && !Number(P.signals.ci.total);
   const roNote = READONLY ? `<div class="banner"><strong>View only.</strong><span>This is an example release with invented names and numbers. You can look at everything, but nothing can be changed or saved.</span></div>` : "";
   const closedNote = isClosed(P) ? `<div class="banner"><strong>Closed: ${esc(P.outcome.status)}.</strong><span>Clear the outcome under After the release to reopen it.</span></div>` : "";
-  const clashNote = isClosed(P) || READONLY ? "" : renderClashBanner(conflictsFor(buildSchedule(lib.order.map((id) => ({ ...(id === lib.current ? P : lib.items[id]), id })), { now: Date.now() }), lib.current), lib.current, { calendarHref: STANDALONE ? (CAN_DOWNLOAD ? "calendar.html" : "") : "/calendar.html" });
+  const clashes = isClosed(P) || READONLY ? [] : conflictsFor(buildSchedule(lib.order.map((id) => ({ ...(id === lib.current ? P : lib.items[id]), id })), { now: Date.now() }), lib.current);
+  const clashNote = renderClashBanner(clashes, lib.current, { calendarHref: STANDALONE ? (CAN_DOWNLOAD ? "calendar.html" : "") : "/calendar.html" });
   const note = roNote + closedNote + clashNote + (fresh ? `<div class="banner"><strong>New release.</strong><span>Name it and set the dates on the left, then add tickets or pull them from Jira. The call stays HOLD until the checks have data, and anything unknown counts as risk.</span></div>` : "");
   renderRelSelect();
-  $("#results").innerHTML = note + renderVerdict(last) + renderRisk(last) + renderPoints(last) + renderDeps(last) + renderCriteria(last) + renderBrief(last) + renderHistory();
+  $("#results").innerHTML = note + renderVerdict(last) + renderRisk(last) + renderPoints(last) + renderDeps(last) + raidPanel(clashes) + renderCriteria(last) + renderBrief(last) + renderHistory();
   const p = last.risk.points;
   const sum = $("#tk-sum");
   if (sum) sum.textContent = `${p.tickets} tickets · ${p.total} points · ${p.done} done`;
@@ -725,6 +783,9 @@ function onEdit(e) {
     setPath(P, el.dataset.p, el.value);
   }
   if (/^(people|extraPeople)\./.test(el.dataset.p)) renderPeopleList();
+  const rt = /^raid\.(\d+)\.type$/.exec(el.dataset.p);
+  if (rt) { const r = P.raid[Number(rt[1])]; r.status = RAID_STATUS[r.type][0]; renderRaidTable(); }
+  else if (/^raid\.\d+\.(status|due)$/.test(el.dataset.p)) renderRaidTable();
   if (el.dataset.p === "outcome.status" && applyOutcomeChange(P, Date.now())) { const at = $("#f-outcome-at"); if (at) at.value = P.outcome.at || ""; }
   changed();
 }
@@ -803,6 +864,17 @@ document.addEventListener("click", async (e) => {
     (P.handoffs ||= []).push({ what: "", from: "Design", to: "Frontend", owner: "", due: P.when.freezeAt || "", status: "Not started", blocks: "" });
     renderHandoffs(); changed();
     const rows = document.querySelectorAll("#handoffs-body tr"); rows[rows.length - 1]?.querySelector("input")?.focus();
+  }
+  else if (act === "add-raid") {
+    (P.raid ||= []).push(emptyRaid("Risk", Date.now()));
+    renderRaidTable(); changed();
+    const rows = document.querySelectorAll("#raid-body tr"); rows[rows.length - 1]?.querySelector("input")?.focus();
+  }
+  else if (act === "del-raid") { P.raid.splice(i, 1); renderRaidTable(); changed(); }
+  else if (act === "raid-accept" || act === "raid-dismiss" || act === "raid-accept-all") {
+    const picked = act === "raid-accept-all" ? [...(RA.suggestions || [])] : (RA.suggestions || []).filter((x) => x.source === a.dataset.src);
+    for (const x of picked) { if (act === "raid-dismiss") (P.raidDismissed ||= []).push(x.source); else (P.raid ||= []).push(acceptSuggestion(x, Date.now())); }
+    renderRaidTable(); renderResults(); changed();
   }
   else if (act === "del-handoff") { P.handoffs.splice(i, 1); renderHandoffs(); changed(); }
   else if (act === "add-step") { P.runbook.push({ id: "s" + Date.now(), phase: "Deploy", step: "", owner: P.people.releaseManager, at: P.when.deployAt, status: "todo" }); renderRunbook(); changed(); }

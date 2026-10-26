@@ -64,6 +64,32 @@ Each clash lists free slots (same time of day, weekdays only, nothing else clash
 
 **Change the rules.** The numbers are in `DEFAULT_RULES` in `src/schedule.js`. To add a new kind of clash, add one entry to `CHECKS` in the same file: `{ id, severity, test(a, b, rules) }`. The calendar and banner read the result, so nothing else changes.
 
+## RAID log
+
+RAID stands for Risks, Assumptions, Issues and Dependencies. Every release has its own log, under **RAID log** on the left of the planner. Each item has a type, what it is, an owner, a due date, a rating (High, Medium, Low), a status and what you are doing about it. The status choices fit the type: a risk or issue is Open, Mitigating (or In progress) or Closed; an assumption is Unchecked, Confirmed or Wrong.
+
+The **RAID log** panel on the right shows what is open and risky right now, and **suggests** items the tool can see for itself:
+
+| Suggested type | Where it comes from |
+| --- | --- |
+| Issue | An open P0 or P1 bug, or a failed migration or rollback check |
+| Dependency | An overdue handoff, or a ticket waiting on other work |
+| Risk | A high-scoring factor in the risk analysis, or a medium or high schedule clash from the calendar |
+
+Add puts a suggestion in the log, Dismiss hides it for good, and Add all takes the lot. Nothing is added without a click. The list shows the most serious eight at a time.
+
+- **Across releases.** The **RAID** page lists every open item from every release saved in this browser, overdue first, then by rating. Filter by type, rating, owner or release, and tick the box to include closed items and releases. On the GitHub Pages site it is `raid.html`.
+- **Next release.** Start next release keeps the open risks and assumptions and drops issues and dependencies, which belong to the release they were found in.
+- There is no AI in this edition. The AI "suggest risks and assumptions" button and the Inbox chase notes for overdue items are in the team edition (`releasedoclogin`).
+
+![RAID log panel with suggestions](docs/raid-panel.png)
+
+![RAID log table in the planner](docs/raid-log.png)
+
+![RAID page across releases](docs/raid-page.png)
+
+**Change it.** The lists (types, statuses, ratings) are constants at the top of `src/raid.js`. To suggest a new kind of item, add one entry to `SOURCES` in the same file: `{ id, build(plan, ctx) }` returning suggestions with a stable `source` string. The planner panel and the page read the result.
+
 ## On another computer
 
 1. Install [Node.js](https://nodejs.org) 20 or newer (the LTS download) and [Git](https://git-scm.com). Check with `node -v`.
@@ -90,7 +116,7 @@ Needs Node 20 or newer. No dependencies to install.
 ```bash
 npm run demo     # invented data, opens at http://localhost:3000
 npm start        # live data, see "Connect your tools"
-npm test         # 112 tests
+npm test         # 129 tests
 ```
 
 `dist/release-planner.standalone.html` is the planner as a single file with no server. Open it in a browser. It has no GitHub or Jira connection and no downloads, but everything else works, and it saves your plan in the browser.
@@ -152,13 +178,15 @@ src/risk.js        story points, forecast, risk score (pure)
 src/plan.js        the plan, templates, runbook generator and handoff steps, brief (pure)
 src/history.js     release history: the call when closed, rows and summary (pure)
 src/schedule.js    release calendar: clash checks, rules, free slots (pure)
+src/raid.js        RAID log: items, rule-based suggestions, cross-release view (pure)
+src/raid-view.js   the RAID page table and counts as HTML (pure)
 src/schedule-view.js  calendar timeline, clash cards and planner banner as HTML (pure)
 src/html.js        the one escape helper shared by the pure view modules
 src/sources/       GitHub, Jira, and demo-data adapters
 src/server.js      HTTP server and JSON API
-public/            dashboard, planner and calendar (plain JS, no build step)
-test/              112 tests, including a mock GitHub and a mock Jira
-scripts/           build-standalone.mjs makes the single-file planner and calendar, and refreshes docs/ (the GitHub Pages site)
+public/            dashboard, planner, calendar and RAID (plain JS, no build step)
+test/              129 tests, including a mock GitHub and a mock Jira
+scripts/           build-standalone.mjs makes the single-file planner, calendar and RAID page, and refreshes docs/ (the GitHub Pages site)
 ```
 
 ## Limits to know about
