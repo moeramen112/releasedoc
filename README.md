@@ -4,6 +4,8 @@ A go/no-go tool for release managers. It answers one question, "can we ship?", f
 
 ![Dashboard](docs/dashboard.png)
 
+Every screenshot has a green bar on top that says **how to get there** (which menu to click).
+
 ## The problem
 
 Before a release, someone collects status by hand from the issue tracker, CI, the security scanner and a dozen Slack threads, then argues about whether it is safe to ship. The answer is in a spreadsheet nobody trusts and a meeting nobody enjoys. This tool puts that answer in one place, computed from the same rules every time, with the reasons attached.
