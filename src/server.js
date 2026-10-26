@@ -89,8 +89,11 @@ export async function createApp({ configPath = path.join(ROOT, "readiness.config
       if (size > 65536) throw new HttpError(413, "Request body too large.");
       chunks.push(c);
     }
-    try { return chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {}; }
+    let body;
+    try { body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {}; }
     catch { throw new HttpError(400, "Body must be JSON."); }
+    if (!body || typeof body !== "object" || Array.isArray(body)) throw new HttpError(400, "Body must be a JSON object.");
+    return body;
   }
 
   // Mutating routes need a custom header and a same-origin request, which blocks
@@ -98,7 +101,11 @@ export async function createApp({ configPath = path.join(ROOT, "readiness.config
   function guard(req) {
     if (req.headers["x-requested-with"] !== "release-readiness") throw new HttpError(403, "Missing X-Requested-With header.");
     const origin = req.headers.origin;
-    if (origin && new URL(origin).host !== req.headers.host) throw new HttpError(403, "Cross-origin request refused.");
+    if (origin) {
+      let host = null;
+      try { host = new URL(origin).host; } catch { /* "null", junk and file:// origins are never ours */ }
+      if (host !== req.headers.host) throw new HttpError(403, "Cross-origin request refused.");
+    }
   }
 
   const text = (v, max = 500) => String(v ?? "").trim().slice(0, max);
