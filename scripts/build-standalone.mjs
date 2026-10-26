@@ -20,13 +20,19 @@ function wrap(name, src) {
 const html = read("public/plan.html");
 const bodyInner = html.slice(html.indexOf("<body>") + 6, html.indexOf('<script type="module"')).replace(/<nav class="nav"[\s\S]*?<\/nav>/, "").trim();
 const css = read("public/styles.css");
-const scripts = [
+const modules = [
   wrap("deps", read("src/deps.js")),
   wrap("engine", read("src/engine.js")),
   wrap("risk", read("src/risk.js")),
   wrap("plan", read("src/plan.js")),
   wrap("history", read("src/history.js")),
-  `window.__STANDALONE = true;\n(() => {\n${read("public/plan-ui.js").replace(/function download\([^)]*\) \{[\s\S]*?\n\}\n/, "function download(name, text, type) { // embedded previews cannot save files; the GitHub Pages copy sets __DOWNLOADS\n  if (window.__DOWNLOADS !== true) return;\n  const url = URL.createObjectURL(new Blob([text], { type }));\n  const a = document.createElement(\"a\");\n  a.href = url; a.download = name;\n  document.body.appendChild(a); a.click(); a.remove();\n  setTimeout(() => URL.revokeObjectURL(url), 1000);\n}\n").replace(/^import\s+\{([^}]+)\}\s+from\s+"[^"]*?([\w-]+)\.js";?\s*$/gm, (_, names, mod) => `const {${names}} = __mod_${mod};`)}\n})();`,
+  wrap("html", read("src/html.js")),
+  wrap("schedule", read("src/schedule.js")),
+  wrap("schedule-view", read("src/schedule-view.js")),
+].join("\n");
+const scripts = [
+  modules,
+  `window.__STANDALONE = true;\n(() => {\n${read("public/plan-ui.js").replace(/function download\([^)]*\) \{[\s\S]*?\n\}\n/, "function download(name, text, type) { // embedded previews cannot save files; the GitHub Pages copy sets __DOWNLOADS\n  if (window.__DOWNLOADS !== true) return;\n  const url = URL.createObjectURL(new Blob([text], { type }));\n  const a = document.createElement(\"a\");\n  a.href = url; a.download = name;\n  document.body.appendChild(a); a.click(); a.remove();\n  setTimeout(() => URL.revokeObjectURL(url), 1000);\n}\n").replace(/^import\s+\{([^}]+)\}\s+from\s+"[^"]*?([\w-]+)\.js";?\s*$/gm, (_, names, mod) => `const {${names}} = __mod_${mod.replace(/-/g, "_")};`)}\n})();`,
 ].join("\n");
 
 const headParts = `<title>Release Planner</title>
@@ -51,3 +57,18 @@ const roScripts = scripts.replace("window.__STANDALONE = true;", "window.__STAND
 const roHead = headParts.replace("<title>Release Planner</title>", "<title>Release Planner Preview</title>");
 writeFileSync(path.join(root, "dist/release-planner.readonly.html"), `${roHead}\n${bodyInner}\n<script>\n${roScripts}\n</script>\n`);
 console.log(`Wrote dist/release-planner.html (${(fragment.length / 1024).toFixed(0)} KB)`);
+
+// The calendar page as one file too, for the GitHub Pages copy. It reads the releases the planner saved in this browser.
+const cal = read("public/calendar.html");
+const calBody = cal.slice(cal.indexOf("<body>") + 6, cal.indexOf('<script type="module"')).replace(/href="\/(?:plan\.html)?"/g, 'href="index.html"').replace('href="index.html">Calendar', 'href="calendar.html">Calendar').replace(/href="\/calendar\.html"/g, 'href="calendar.html"').trim();
+const calJs = read("public/calendar.js").replace(/^import\s+\{([^}]+)\}\s+from\s+"[^"]*?([\w-]+)\.js";?\s*$/gm, (_, names, mod) => `const {${names}} = __mod_${mod.replace(/-/g, "_")};`);
+const calScripts = `${modules}\nwindow.__STANDALONE = true;\n(() => {\n${calJs}\n})();`;
+const calPage = `<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n<meta name="viewport" content="width=device-width, initial-scale=1">\n<title>Release calendar</title>\n<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Schibsted+Grotesk:wght@400;500;600;700&display=swap">\n<style>\n${css}\n</style>\n</head>\n<body>\n${calBody}\n<script>\n${calScripts}\n</script>\n</body>\n</html>\n`;
+writeFileSync(path.join(root, "dist/release-calendar.html"), calPage);
+
+// The GitHub Pages site (docs/): the planner with downloads switched on, and the calendar beside it.
+const standalone = read("dist/release-planner.standalone.html");
+mkdirSync(path.join(root, "docs"), { recursive: true });
+writeFileSync(path.join(root, "docs/index.html"), standalone.replace("window.__STANDALONE = true;", "window.__STANDALONE = true;\nwindow.__DOWNLOADS = true;"));
+writeFileSync(path.join(root, "docs/calendar.html"), calPage);
+console.log("Wrote dist/release-calendar.html, docs/index.html and docs/calendar.html");

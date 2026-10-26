@@ -42,6 +42,28 @@ Releases are saved in the browser you use, not on a server. Clearing site data r
 
 Per-release criteria are already supported by the engine: a release can switch a criterion off, make it advisory, or add its own checks that a person confirms. There is no screen for it yet, so today that is set in the plan file.
 
+## Release calendar
+
+Open **Calendar** to see every open release saved in this browser on one timeline: a bar for the deploy window, a thin line for the freeze, a dot for the go/no-go meeting, and a red line for now. Pick 2, 4 or 8 weeks. Closed releases are hidden unless you tick the box. On the GitHub Pages site it is `calendar.html`, next to the planner, and reads the same saved releases.
+
+It checks every pair of open releases for five kinds of clash:
+
+| Clash | Level | Plain meaning |
+| --- | --- | --- |
+| Overlap | Clash | Two deploy windows run at the same time |
+| Too close | Close | Two deploys are less than 12 hours apart |
+| Shared people | Close | The same release manager, SRE or QA lead is on two deploys less than 24 hours apart |
+| Freeze clash | Close | A deploy lands inside another release's freeze, on the same repository |
+| Meeting clash | Heads up | Two go/no-go meetings within an hour, with the same release manager |
+
+Each clash lists free slots (same time of day, weekdays only, nothing else clashing) for moving either release, and the planner shows a banner when the release you have open clashes with another. There is no AI in this edition. The AI "which one should move" check and the Inbox chase notes are in the team edition (`releasedoclogin`).
+
+![Release calendar](docs/calendar.png)
+
+![Planner banner for a release that clashes](docs/calendar-banner.png)
+
+**Change the rules.** The numbers are in `DEFAULT_RULES` in `src/schedule.js`. To add a new kind of clash, add one entry to `CHECKS` in the same file: `{ id, severity, test(a, b, rules) }`. The calendar and banner read the result, so nothing else changes.
+
 ## On another computer
 
 1. Install [Node.js](https://nodejs.org) 20 or newer (the LTS download) and [Git](https://git-scm.com). Check with `node -v`.
@@ -68,7 +90,7 @@ Needs Node 20 or newer. No dependencies to install.
 ```bash
 npm run demo     # invented data, opens at http://localhost:3000
 npm start        # live data, see "Connect your tools"
-npm test         # 62 tests
+npm test         # 112 tests
 ```
 
 `dist/release-planner.standalone.html` is the planner as a single file with no server. Open it in a browser. It has no GitHub or Jira connection and no downloads, but everything else works, and it saves your plan in the browser.
@@ -129,11 +151,14 @@ src/engine.js      criteria evaluators, waivers, verdict (pure)
 src/risk.js        story points, forecast, risk score (pure)
 src/plan.js        the plan, templates, runbook generator and handoff steps, brief (pure)
 src/history.js     release history: the call when closed, rows and summary (pure)
+src/schedule.js    release calendar: clash checks, rules, free slots (pure)
+src/schedule-view.js  calendar timeline, clash cards and planner banner as HTML (pure)
+src/html.js        the one escape helper shared by the pure view modules
 src/sources/       GitHub, Jira, and demo-data adapters
 src/server.js      HTTP server and JSON API
-public/            dashboard and planner (plain JS, no build step)
-test/              90 tests, including a mock GitHub and a mock Jira
-scripts/           build-standalone.mjs makes the single-file planner
+public/            dashboard, planner and calendar (plain JS, no build step)
+test/              112 tests, including a mock GitHub and a mock Jira
+scripts/           build-standalone.mjs makes the single-file planner and calendar, and refreshes docs/ (the GitHub Pages site)
 ```
 
 ## Limits to know about

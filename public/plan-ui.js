@@ -5,6 +5,8 @@ import { computeRisk } from "/risk.js";
 import { analyzeDependencies, parseKeys, TEAMS, HANDOFF_STATUS } from "/deps.js";
 import { mergeTickets, defaultPlan, blankPlan, nextPlan, applyTemplate, generateRunbook, syncHandoffSteps, isClosed, OUTCOMES, planToSnapshot, planState, planConfig, briefMarkdown, reportModel, reportHtml, reportDocument, reportWord, statusModel, TYPES, PRIORITIES, TICKET_TYPES, STATUSES, AREAS, ENVIRONMENTS, STRATEGIES, CHECK_STATES, PHASES, ROLE_KEYS, TEMPLATES } from "/plan.js";
 import { applyOutcomeChange, historyRows, historySummary } from "/history.js";
+import { buildSchedule, conflictsFor } from "/schedule.js";
+import { renderClashBanner } from "/schedule-view.js";
 
 const $ = (s, r = document) => r.querySelector(s);
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -684,7 +686,8 @@ function renderResults() {
   const fresh = !P.release.name.trim() && P.tickets.length === 0 && !Number(P.signals.ci.total);
   const roNote = READONLY ? `<div class="banner"><strong>View only.</strong><span>This is an example release with invented names and numbers. You can look at everything, but nothing can be changed or saved.</span></div>` : "";
   const closedNote = isClosed(P) ? `<div class="banner"><strong>Closed: ${esc(P.outcome.status)}.</strong><span>Clear the outcome under After the release to reopen it.</span></div>` : "";
-  const note = roNote + closedNote + (fresh ? `<div class="banner"><strong>New release.</strong><span>Name it and set the dates on the left, then add tickets or pull them from Jira. The call stays HOLD until the checks have data, and anything unknown counts as risk.</span></div>` : "");
+  const clashNote = isClosed(P) || READONLY ? "" : renderClashBanner(conflictsFor(buildSchedule(lib.order.map((id) => ({ ...(id === lib.current ? P : lib.items[id]), id })), { now: Date.now() }), lib.current), lib.current, { calendarHref: STANDALONE ? (CAN_DOWNLOAD ? "calendar.html" : "") : "/calendar.html" });
+  const note = roNote + closedNote + clashNote + (fresh ? `<div class="banner"><strong>New release.</strong><span>Name it and set the dates on the left, then add tickets or pull them from Jira. The call stays HOLD until the checks have data, and anything unknown counts as risk.</span></div>` : "");
   renderRelSelect();
   $("#results").innerHTML = note + renderVerdict(last) + renderRisk(last) + renderPoints(last) + renderDeps(last) + renderCriteria(last) + renderBrief(last) + renderHistory();
   const p = last.risk.points;

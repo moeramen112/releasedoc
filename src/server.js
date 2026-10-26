@@ -192,7 +192,7 @@ export async function createApp({ configPath = path.join(ROOT, "readiness.config
   };
 
   // The browser runs the same pure modules as the server, so the planner and the dashboard cannot disagree.
-  const SHARED = { "/engine.js": "engine.js", "/risk.js": "risk.js", "/plan.js": "plan.js", "/deps.js": "deps.js", "/history.js": "history.js" };
+  const SHARED = { "/engine.js": "engine.js", "/risk.js": "risk.js", "/plan.js": "plan.js", "/deps.js": "deps.js", "/history.js": "history.js", "/html.js": "html.js", "/schedule.js": "schedule.js", "/schedule-view.js": "schedule-view.js" };
 
   async function serveStatic(pathname, res) {
     const rel = pathname === "/" ? "/index.html" : pathname;
