@@ -29,6 +29,7 @@ const modules = [
   wrap("html", read("src/html.js")),
   wrap("schedule", read("src/schedule.js")),
   wrap("schedule-view", read("src/schedule-view.js")),
+  wrap("raid", read("src/raid.js")),
 ].join("\n");
 const scripts = [
   modules,
@@ -58,17 +59,23 @@ const roHead = headParts.replace("<title>Release Planner</title>", "<title>Relea
 writeFileSync(path.join(root, "dist/release-planner.readonly.html"), `${roHead}\n${bodyInner}\n<script>\n${roScripts}\n</script>\n`);
 console.log(`Wrote dist/release-planner.html (${(fragment.length / 1024).toFixed(0)} KB)`);
 
-// The calendar page as one file too, for the GitHub Pages copy. It reads the releases the planner saved in this browser.
-const cal = read("public/calendar.html");
-const calBody = cal.slice(cal.indexOf("<body>") + 6, cal.indexOf('<script type="module"')).replace(/href="\/(?:plan\.html)?"/g, 'href="index.html"').replace('href="index.html">Calendar', 'href="calendar.html">Calendar').replace(/href="\/calendar\.html"/g, 'href="calendar.html"').trim();
-const calJs = read("public/calendar.js").replace(/^import\s+\{([^}]+)\}\s+from\s+"[^"]*?([\w-]+)\.js";?\s*$/gm, (_, names, mod) => `const {${names}} = __mod_${mod.replace(/-/g, "_")};`);
-const calScripts = `${modules}\nwindow.__STANDALONE = true;\n(() => {\n${calJs}\n})();`;
-const calPage = `<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n<meta name="viewport" content="width=device-width, initial-scale=1">\n<title>Release calendar</title>\n<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Schibsted+Grotesk:wght@400;500;600;700&display=swap">\n<style>\n${css}\n</style>\n</head>\n<body>\n${calBody}\n<script>\n${calScripts}\n</script>\n</body>\n</html>\n`;
+// The calendar and RAID pages as one file each, for the GitHub Pages copy. They read the releases the planner saved in this browser.
+function buildPage(name, title) {
+  const src = read(`public/${name}.html`);
+  const body = src.slice(src.indexOf("<body>") + 6, src.indexOf('<script type="module"')).replace(/href="\/(?:plan\.html)?"/g, 'href="index.html"').replace(/href="\/(calendar|raid)\.html"/g, 'href="$1.html"').trim();
+  const js = read(`public/${name === "raid" ? "raid-page" : name}.js`).replace(/^import\s+\{([^}]+)\}\s+from\s+"[^"]*?([\w-]+)\.js";?\s*$/gm, (_, names, mod) => `const {${names}} = __mod_${mod.replace(/-/g, "_")};`);
+  const extra = name === "raid" ? wrap("raid-view", read("src/raid-view.js")) : "";
+  return `<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n<meta name="viewport" content="width=device-width, initial-scale=1">\n<title>${title}</title>\n<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Schibsted+Grotesk:wght@400;500;600;700&display=swap">\n<style>\n${css}\n</style>\n</head>\n<body>\n${body}\n<script>\n${modules}\n${extra}\nwindow.__STANDALONE = true;\n(() => {\n${js}\n})();\n</script>\n</body>\n</html>\n`;
+}
+const calPage = buildPage("calendar", "Release calendar");
+const raidPage = buildPage("raid", "RAID log");
 writeFileSync(path.join(root, "dist/release-calendar.html"), calPage);
+writeFileSync(path.join(root, "dist/release-raid.html"), raidPage);
 
 // The GitHub Pages site (docs/): the planner with downloads switched on, and the calendar beside it.
 const standalone = read("dist/release-planner.standalone.html");
 mkdirSync(path.join(root, "docs"), { recursive: true });
 writeFileSync(path.join(root, "docs/index.html"), standalone.replace("window.__STANDALONE = true;", "window.__STANDALONE = true;\nwindow.__DOWNLOADS = true;"));
 writeFileSync(path.join(root, "docs/calendar.html"), calPage);
-console.log("Wrote dist/release-calendar.html, docs/index.html and docs/calendar.html");
+writeFileSync(path.join(root, "docs/raid.html"), raidPage);
+console.log("Wrote dist/release-calendar.html, dist/release-raid.html, docs/index.html, docs/calendar.html and docs/raid.html");

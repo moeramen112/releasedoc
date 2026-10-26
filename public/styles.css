@@ -142,7 +142,7 @@ td .id { font-family: var(--font-data); font-size: 12px; color: var(--muted); di
 @media (prefers-reduced-motion: no-preference) { .progress span, .bar span { transition: width .3s ease; } }
 
 /* ---------- navigation ---------- */
-.nav { display: flex; gap: 4px; }
+.nav { display: flex; flex-wrap: wrap; gap: 4px; }
 .nav a { text-decoration: none; color: var(--muted); font-weight: 600; font-size: 13px; padding: 5px 11px; border-radius: 6px; border: 1px solid transparent; }
 .nav a:hover { color: var(--ink); border-color: var(--line); }
 .nav a[aria-current="page"] { color: var(--accent-ink); background: var(--accent); }
@@ -320,3 +320,19 @@ ul.plain { margin: 0; padding-left: 18px; display: flex; flex-direction: column;
 .clash-card.sev-high { border-left-color: var(--bad); } .clash-card.sev-medium { border-left-color: var(--warn); } .clash-card.sev-low { border-left-color: var(--pend); }
 .clash-card > div { display: flex; flex-direction: column; gap: 6px; }
 .msg.ok { color: var(--good); }
+
+/* ---------- RAID page ---------- */
+.raid-filters { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin: 10px 0; }
+.tbl tr.done td { opacity: .6; }
+
+/* long names with no spaces must wrap instead of widening the page */
+.clash-card > div, .cal-name, .tbl td, .ai-item, .banner span { overflow-wrap: anywhere; }
+.clash-card > div { min-width: 0; }
+.raid-filters label, .raid-filters select { max-width: 100%; }
+@media (max-width: 560px) { .raid-filters { flex-direction: column; align-items: stretch; } .raid-filters label { display: flex; justify-content: space-between; gap: 8px; } .raid-filters select { max-width: 60%; } .cal { max-width: 100%; } }
+
+/* suggestion cards, used by the RAID panel */
+.ai-list { display: flex; flex-direction: column; gap: 8px; }
+.ai-item { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; flex-wrap: wrap; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; background: var(--surface-2); }
+.ai-item > div:first-child { flex: 1 1 220px; min-width: 0; }
+.ag-h { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); font-weight: 600; margin: 4px 0 0; }
