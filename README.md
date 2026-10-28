@@ -135,6 +135,22 @@ Copy `.env.example` and set what you have. Everything is optional.
 
 Edit `readiness.config.json` to change the repository, release branch, label names, JQL, the Jira story-points field (`customfield_10016` on most sites, but it varies), and the list of criteria.
 
+## Tickets from any tool
+
+Jira stays the built-in source. Two ways to bring in tickets from anything else. The first works everywhere, including the single-file copy and the GitHub Pages copy:
+
+**Import from a spreadsheet** (no keys, no setup). In the planner, under the tickets table, press **Import from spreadsheet**. Paste rows from a sheet (with the header row) or load a CSV file. The columns are guessed from the headers, you can change any of them, and a preview shows what will be imported before anything changes. Tickets with a key you already have are updated, new ones are added, nothing is deleted, and **Undo** puts it back. It reads exports from Jira, Linear, Asana, Azure DevOps, Trello, or a plain spreadsheet. Priorities (Highest, Critical, P0, 1 and so on), statuses (Done, In QA, Backlog) and types (Bug, Defect, Story) are turned into the planner's words; anything it does not recognise becomes P2 and you are told.
+
+![Import tickets from a spreadsheet: pick the columns, preview, then import](docs/import-tickets.png)
+
+**Plug in another tracker** (for a developer). A tracker is one small object in `src/trackers.js`: an `id`, a `label`, the settings it `needs`, a `configured(env)` check and a `fetchTickets({ version, config, env })` function that returns tickets in the planner's shape. Pass it in `deps.trackers` to `createApp`, or add it to the built-in list. When the server knows more than one tracker, the planner shows a **Ticket source** choice, and Pull and Refresh use it. `GET /api/tickets?tracker=<id>&version=<name>` is the generic address; `/api/jira/issues` still works.
+
+For a Jira site with its own workflow, `readiness.config.json` can now map statuses and types without code changes:
+
+```json
+"jira": { "statusMap": { "Awaiting Sign-off": "In review" }, "typeMap": { "Spike": "Story" }, "priorityMap": {}, "storyPointsField": "customfield_10016" }
+```
+
 ## How it works
 
 ```
@@ -185,9 +201,11 @@ src/raid-view.js   the RAID page table and counts as HTML (pure)
 src/schedule-view.js  calendar timeline, clash cards and planner banner as HTML (pure)
 src/html.js        the one escape helper shared by the pure view modules
 src/sources/       GitHub, Jira, and demo-data adapters
+src/trackers.js    the ticket-tracker plug-in shape, with Jira built in
+src/import.js     spreadsheet import: parse, guess the columns, map to tickets (pure)
 src/server.js      HTTP server and JSON API
 public/            dashboard, planner, calendar and RAID (plain JS, no build step)
-test/              129 tests, including a mock GitHub and a mock Jira
+test/              153 tests, including a mock GitHub and a mock Jira
 scripts/           build-standalone.mjs makes the single-file planner, calendar and RAID page, and refreshes docs/ (the GitHub Pages site)
 ```
 

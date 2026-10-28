@@ -9,7 +9,8 @@ import { evaluate, openBlockerCount } from "./engine.js";
 import { buildSnapshot } from "./snapshot.js";
 import { createStore, auditEntry } from "./state.js";
 import { DEMO_SEED } from "./sources/fixture.js";
-import { jiraConfigured, fetchJiraRelease } from "./sources/jira.js";
+import { jiraConfigured } from "./sources/jira.js";
+import { createTrackers } from "./trackers.js";
 import { buildSlackMessage, sendSlack } from "./notify.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -27,6 +28,7 @@ class HttpError extends Error {
 }
 
 export async function createApp({ configPath = path.join(ROOT, "readiness.config.json"), stateDir = process.env.STATE_DIR || path.join(ROOT, "data"), defaultMode = isDemo() ? "demo" : "live", env = process.env, deps = {} } = {}) {
+  const trackers = createTrackers(deps.trackers || []);
   const config = JSON.parse(await fs.readFile(configPath, "utf8"));
   const stores = {};
   // Waivers, manual checks and the audit log belong to one release, so each repo and release branch gets its own file.
@@ -77,7 +79,7 @@ export async function createApp({ configPath = path.join(ROOT, "readiness.config
       result,
       history: state.history.filter((h) => h.key === key).slice(-60),
       audit: state.audit.slice(-25).reverse(),
-      integrations: { github: Boolean(env.GITHUB_TOKEN), jira: jiraConfigured(env), slack: Boolean(env.SLACK_WEBHOOK_URL) },
+      integrations: { github: Boolean(env.GITHUB_TOKEN), jira: jiraConfigured(env), slack: Boolean(env.SLACK_WEBHOOK_URL), trackers: trackers.list(env) },
     };
   }
 
@@ -110,28 +112,35 @@ export async function createApp({ configPath = path.join(ROOT, "readiness.config
 
   const text = (v, max = 500) => String(v ?? "").trim().slice(0, max);
 
+  async function ticketsFrom(trackerId, versionRaw) {
+    const tracker = trackers.get(trackerId);
+    if (!tracker) throw new HttpError(400, "That ticket tracker is not set up.");
+    if (!tracker.configured(env)) throw new HttpError(400, `${tracker.label} is not configured. Set ${tracker.needs} on the server.`);
+    const version = text(versionRaw, 80);
+    if (!version) throw new HttpError(400, `Enter the ${tracker.label} ${tracker.versionLabel} first.`);
+    // Tests and old callers can still replace the Jira fetcher with deps.fetchJiraRelease.
+    const fetchTickets = tracker.id === "jira" && deps.fetchJiraRelease ? deps.fetchJiraRelease : tracker.fetchTickets;
+    try {
+      const issues = await fetchTickets({ version, config, env });
+      return { tracker: tracker.id, version, issues };
+    } catch (e) {
+      throw new HttpError(502, e.message);
+    }
+  }
+
   const routes = {
     "GET /api/config": async () => ({
       release: config.release,
       defaultMode,
       criteria: config.criteria.map(({ id, name, type, source, required, params }) => ({ id, name, type, source: source || "github", required: required !== false, checkId: type === "manual" ? params.checkId : undefined })),
-      integrations: { github: Boolean(env.GITHUB_TOKEN), jira: jiraConfigured(env), slack: Boolean(env.SLACK_WEBHOOK_URL) },
+      integrations: { github: Boolean(env.GITHUB_TOKEN), jira: jiraConfigured(env), slack: Boolean(env.SLACK_WEBHOOK_URL), trackers: trackers.list(env) },
     }),
 
     "GET /api/readiness": async (req, url) => payload(target(url.searchParams), url.searchParams.get("refresh") === "1"),
 
-    // Tickets and story points for the planner. Needs JIRA_BASE_URL, JIRA_EMAIL and JIRA_API_TOKEN on the server.
-    "GET /api/jira/issues": async (req, url) => {
-      if (!jiraConfigured(env)) throw new HttpError(400, "Jira is not configured. Set JIRA_BASE_URL, JIRA_EMAIL and JIRA_API_TOKEN on the server.");
-      const version = text(url.searchParams.get("version"), 80);
-      if (!version) throw new HttpError(400, "Enter the Jira fix version first.");
-      try {
-        const issues = await (deps.fetchJiraRelease || fetchJiraRelease)({ version, config, env });
-        return { version, issues };
-      } catch (e) {
-        throw new HttpError(502, e.message);
-      }
-    },
+    // Tickets and story points for the planner, from any tracker (Jira is the built-in one). Settings live on the server.
+    "GET /api/tickets": async (req, url) => ticketsFrom(url.searchParams.get("tracker"), url.searchParams.get("version")),
+    "GET /api/jira/issues": async (req, url) => ticketsFrom("jira", url.searchParams.get("version")), // the original address, kept so nothing that calls it breaks
 
     "POST /api/waive": async (req, url) => {
       guard(req);
@@ -199,7 +208,7 @@ export async function createApp({ configPath = path.join(ROOT, "readiness.config
   };
 
   // The browser runs the same pure modules as the server, so the planner and the dashboard cannot disagree.
-  const SHARED = { "/engine.js": "engine.js", "/risk.js": "risk.js", "/plan.js": "plan.js", "/deps.js": "deps.js", "/history.js": "history.js", "/html.js": "html.js", "/schedule.js": "schedule.js", "/schedule-view.js": "schedule-view.js", "/raid.js": "raid.js", "/raid-view.js": "raid-view.js" };
+  const SHARED = { "/engine.js": "engine.js", "/risk.js": "risk.js", "/plan.js": "plan.js", "/deps.js": "deps.js", "/history.js": "history.js", "/html.js": "html.js", "/schedule.js": "schedule.js", "/schedule-view.js": "schedule-view.js", "/raid.js": "raid.js", "/raid-view.js": "raid-view.js", "/import.js": "import.js" };
 
   async function serveStatic(pathname, res) {
     const rel = pathname === "/" ? "/index.html" : pathname;
