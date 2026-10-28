@@ -30,6 +30,7 @@ const modules = [
   wrap("schedule", read("src/schedule.js")),
   wrap("schedule-view", read("src/schedule-view.js")),
   wrap("raid", read("src/raid.js")),
+  wrap("import", read("src/import.js")),
 ].join("\n");
 const scripts = [
   modules,
