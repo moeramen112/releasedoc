@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { defaultPlan, blankPlan, nextPlan, generateRunbook, syncHandoffSteps, runbookStatus, isClosed, emptyOutcome, OUTCOMES } from "../src/plan.js";
-import { takeSnapshot, applyOutcomeChange, historyRows, historySummary } from "../src/history.js";
+import { takeSnapshot, applyOutcomeChange, historyRows, historySummary, historyTrends } from "../src/history.js";
 
 const NOW = Date.UTC(2026, 9, 21, 16);
 
@@ -125,4 +125,30 @@ test("a release closed without a snapshot (older data) still appears", () => {
 
 test("OUTCOMES are the four expected values", () => {
   assert.deepEqual(OUTCOMES, ["Shipped cleanly", "Shipped with issues", "Rolled back", "Cancelled"]);
+});
+
+/* ---------- trends ---------- */
+const row = (status, call, risk, at) => ({ status, call, risk, at, shipped: ["Shipped cleanly", "Shipped with issues", "Rolled back"].includes(status), trouble: ["Shipped with issues", "Rolled back"].includes(status) });
+
+test("trends: change failure rate, call accuracy, risk by outcome and months", () => {
+  const t = historyTrends([
+    row("Shipped cleanly", "GO", 10, "2026-08-03T10:00"), row("Shipped cleanly", "GO", 20, "2026-08-20T10:00"),
+    row("Shipped with issues", "GO", 50, "2026-09-02T10:00"), row("Rolled back", "NO-GO", 80, "2026-09-15T10:00"),
+    row("Shipped cleanly", "HOLD", 40, "2026-09-20T10:00"), row("Cancelled", "HOLD", 70, "2026-09-21T10:00"),
+  ]);
+  assert.equal(t.shipped, 5); assert.equal(t.trouble, 2); assert.equal(t.changeFailureRate, 40);
+  assert.equal(t.judged, 5); assert.equal(t.right, 3); assert.equal(t.callRight, 60); assert.equal(t.missed, 1); assert.equal(t.cautious, 1);
+  assert.deepEqual(t.riskByOutcome["Shipped cleanly"], { avg: 23, n: 3 });
+  assert.equal(t.riskByOutcome.Cancelled.avg, 70);
+  assert.deepEqual(t.months, [{ month: "2026-08", shipped: 2, trouble: 0 }, { month: "2026-09", shipped: 3, trouble: 2 }]);
+  assert.equal(t.enough, true);
+});
+
+test("trends: empty, thin and odd input never divide by zero or throw", () => {
+  for (const bad of [[], null, undefined, "x", [{ status: "Cancelled" }]]) {
+    const t = historyTrends(bad);
+    assert.equal(t.changeFailureRate, null); assert.equal(t.callRight, null); assert.equal(t.enough, false); assert.deepEqual(t.months, []);
+  }
+  const one = historyTrends([row("Shipped cleanly", "", null, "not a date")]);
+  assert.equal(one.changeFailureRate, 0); assert.equal(one.callRight, null); assert.equal(one.enough, false); assert.deepEqual(one.months, []);
 });

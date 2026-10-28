@@ -221,7 +221,7 @@ scripts/           build-standalone.mjs makes the single-file planner, calendar 
 1. Read CI status from the CI provider directly, and map it to the release branch automatically.
 2. Learn the weights from history: which factors preceded a rollback or an incident.
 3. Post to Slack on a schedule, and when a criterion changes state.
-4. Per-team criteria sets, and trends over time in Release history.
+4. Per-team criteria sets.
 
 ## Demo script (three minutes)
 
@@ -239,7 +239,7 @@ Questions to expect: why these weights (opinions with tests, meant to be tuned),
 - **Release docs**: in the Release brief panel, **Copy for Docs**, **Word (.doc)**, **Printable page** (print, then Save as PDF) and a **Status one-pager** for leadership.
 
 - **Runbook steps from handoffs**: under Runbook, **Add steps from handoffs** adds a Pre-release step for each handoff that is not Done, with the handoff's owner and due date. Press it again later and those steps follow their handoff's status. Nothing is removed, and steps you wrote are never touched.
-- **Release history**: the last section on the left, **After the release**, records how a release went (shipped cleanly, shipped with issues, rolled back, cancelled) with a note. That closes the release and saves the call and risk score as they were at that moment. The **Release history** panel at the bottom of the results lists closed releases, with counts and how each call held up. Clear the outcome to reopen it.
+- **Release history**: the last section on the left, **After the release**, records how a release went (shipped cleanly, shipped with issues, rolled back, cancelled) with a note. That closes the release and saves the call and risk score as they were at that moment. The **Release history** panel at the bottom of the results lists closed releases, with counts, how each call held up, and trends: change failure rate, how often the call was right, average risk per outcome and shipped per month (needs at least 3 shipped releases to mean much). Clear the outcome to reopen it.
 
 ![The runbook, with the Add steps from handoffs button](docs/runbook-handoffs.png)
 
