@@ -345,3 +345,10 @@ ul.plain { margin: 0; padding-left: 18px; display: flex; flex-direction: column;
 .ti-map span { color: var(--muted); }
 .ti-map select { max-width: 100%; }
 #tk-source select { margin-left: 4px; }
+
+/* History trends */
+.trends { margin: 10px 0; }
+.trend-row { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 6px; }
+.trend { flex: 1 1 180px; border: 1px solid var(--line, #d8d8d8); border-radius: 8px; padding: 10px 12px; }
+.trend-n { font: 600 28px/1.1 "IBM Plex Mono", monospace; }
+.trend-l { font-weight: 600; margin-top: 2px; }

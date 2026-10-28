@@ -4,7 +4,7 @@ import { evaluate } from "/engine.js";
 import { computeRisk } from "/risk.js";
 import { analyzeDependencies, parseKeys, TEAMS, HANDOFF_STATUS } from "/deps.js";
 import { mergeTickets, completePlan, defaultPlan, blankPlan, nextPlan, applyTemplate, generateRunbook, syncHandoffSteps, isClosed, OUTCOMES, planToSnapshot, planState, planConfig, briefMarkdown, reportModel, reportHtml, reportDocument, reportWord, statusModel, TYPES, PRIORITIES, TICKET_TYPES, STATUSES, AREAS, ENVIRONMENTS, STRATEGIES, CHECK_STATES, PHASES, ROLE_KEYS, TEMPLATES } from "/plan.js";
-import { applyOutcomeChange, historyRows, historySummary } from "/history.js";
+import { applyOutcomeChange, historyRows, historySummary, historyTrends } from "/history.js";
 import { parseTable, suggestMapping, mapTickets, IMPORT_FIELDS, IMPORT_LIMITS } from "/import.js";
 import { buildSchedule, conflictsFor } from "/schedule.js";
 import { renderClashBanner } from "/schedule-view.js";
@@ -691,6 +691,19 @@ function renderCriteria({ result }) {
 const OUT_CHIP = { "Shipped cleanly": "pass", "Shipped with issues": "warn", "Rolled back": "fail", Cancelled: "waived" };
 const histWhen = (v) => { const t = Date.parse(v); return Number.isNaN(t) ? "" : new Date(t).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }); };
 
+function renderTrends(t) {
+  if (!t || !t.shipped) return "";
+  const monthName = (k) => new Date(`${k}-15T12:00:00`).toLocaleDateString("en-US", { month: "short", year: "2-digit" });
+  const stat = (big, label, hint) => `<div class="trend"><div class="trend-n">${big}</div><div class="trend-l">${esc(label)}</div><div class="msg">${esc(hint)}</div></div>`;
+  const cfr = stat(`${t.changeFailureRate}%`, "Change failure rate", `${t.trouble} of ${t.shipped} shipped had issues or were rolled back`);
+  const call = t.judged ? stat(`${t.callRight}%`, "Calls that were right", `${t.right} of ${t.judged}${t.missed ? `; ${t.missed} GO had trouble` : ""}${t.cautious ? `; ${t.cautious} held but shipped fine` : ""}`) : "";
+  const order = ["Shipped cleanly", "Shipped with issues", "Rolled back", "Cancelled"].filter((k) => t.riskByOutcome[k]);
+  const risk = order.length ? `<div class="msg">Average risk at close: ${order.map((k) => `${esc(k.toLowerCase())} ${t.riskByOutcome[k].avg} (${t.riskByOutcome[k].n})`).join(", ")}.</div>` : "";
+  const months = t.months.length > 1 ? `<div class="msg">Shipped per month: ${t.months.map((m) => `${esc(monthName(m.month))} ${m.shipped}${m.trouble ? ` (${m.trouble} with trouble)` : ""}`).join(", ")}.</div>` : "";
+  const thin = t.enough ? "" : `<div class="msg">Only ${t.shipped} shipped so far, so treat these as a first look, not a trend.</div>`;
+  return `<div class="trends" id="history-trends"><div class="trend-row">${cfr}${call}</div>${risk}${months}${thin}</div>`;
+}
+
 /** Closed releases and how they turned out. */
 function renderHistory() {
   const rows = historyRows(lib.order.map((id) => ({ ...(id === lib.current ? P : lib.items[id]), id }))), sum = historySummary(rows), currentId = lib.current;
@@ -699,7 +712,7 @@ function renderHistory() {
   const tally = [["clean", "shipped cleanly", "pass"], ["issues", "shipped with issues", "warn"], ["rolledBack", "rolled back", "fail"], ["cancelled", "cancelled", "waived"]].filter(([k]) => sum[k]).map(([k, l, c]) => `<span class="chip s-${c}"><i></i>${sum[k]} ${l}</span>`).join(" ");
   const calls = ["GO", "HOLD", "NO-GO"].filter((c) => sum.byCall[c]).map((c) => `<li><strong>${esc(c)}</strong> at close: ${sum.byCall[c].shipped} shipped, ${sum.byCall[c].trouble} had issues or were rolled back</li>`).join("");
   const body = rows.map((r) => `<tr><td>${esc(r.name)}${r.version ? ` <span class="mono">${esc(r.version)}</span>` : ""}<div class="msg">${esc(histWhen(r.at))}</div></td><td><span class="chip s-${OUT_CHIP[r.status] || "pending"}"><i></i>${esc(r.status)}</span></td><td>${r.call ? `${esc(r.call)}${r.risk === null ? "" : `<div class="msg">risk ${r.risk}</div>`}` : "—"}</td><td>${r.id === currentId ? `<span class="msg">Open now</span>` : `<button class="btn small" type="button" data-act="open-release" data-id="${esc(r.id)}">Open</button>`}</td></tr>${r.note ? `<tr><td colspan="4" class="msg">${esc(r.note.length > 200 ? r.note.slice(0, 200) + "…" : r.note)}</td></tr>` : ""}`).join("");
-  return `<section class="panel" id="history-panel">${head}<div class="row-actions">${tally}</div>${sum.shippedAgainstCall ? `<div class="msg">${sum.shippedAgainstCall} shipped while the call was HOLD or NO-GO.</div>` : ""}${calls ? `<ul class="plain">${calls}</ul>` : ""}<div class="tablewrap"><table class="tbl"><thead><tr><th>Release</th><th>Outcome</th><th>Call when closed</th><th></th></tr></thead><tbody>${body}</tbody></table></div></section>`;
+  return `<section class="panel" id="history-panel">${head}<div class="row-actions">${tally}</div>${renderTrends(historyTrends(rows))}${sum.shippedAgainstCall ? `<div class="msg">${sum.shippedAgainstCall} shipped while the call was HOLD or NO-GO.</div>` : ""}${calls ? `<ul class="plain">${calls}</ul>` : ""}<div class="tablewrap"><table class="tbl"><thead><tr><th>Release</th><th>Outcome</th><th>Call when closed</th><th></th></tr></thead><tbody>${body}</tbody></table></div></section>`;
 }
 
 function renderBrief({ brief }) {
